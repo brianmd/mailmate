@@ -120,12 +120,15 @@ have_gem() { "$RUBY" -e "gem '$1'" >/dev/null 2>&1; }
 
 install_optional_markdown() {
   # reverse_markdown powers `message markdown:true` (HTML mail -> readable
-  # markdown). Its nokogiri dependency ships precompiled for darwin, but if
-  # installation fails anyway the server degrades gracefully — so tolerate it.
+  # markdown). Its nokogiri dependency ships precompiled for darwin, but on
+  # machines that fall back to compiling it can take minutes — long enough to
+  # trip an MCP client's startup timeout. So attempt it in the background:
+  # the server starts immediately and degrades gracefully until (unless) the
+  # gem lands; the next launch picks it up.
   if ! have_gem reverse_markdown; then
-    log "Installing reverse_markdown (optional, for HTML->markdown rendering)..."
-    "$GEM" install --no-document reverse_markdown >/dev/null 2>&1 \
-      || log "WARNING: reverse_markdown failed to install; 'markdown: true' will fall back to raw HTML."
+    log "Installing reverse_markdown in the background (optional, for HTML->markdown rendering)..."
+    ( "$GEM" install --no-document reverse_markdown >/dev/null 2>&1 \
+        || log "note: reverse_markdown did not install (usually a missing C toolchain); 'markdown: true' falls back to raw HTML." ) &
   fi
 }
 

@@ -60,6 +60,16 @@ This repo doubles as a Claude Code plugin marketplace. Inside Claude Code:
 
 The plugin's MCP server self-provisions on first launch — Ruby (if needed) and gem dependencies go into `~/.mailmate-mcp`; nothing touches your system Ruby, Homebrew, or shell profile. It runs the plugin's bundled source, so plugin updates take effect without waiting for a gem release. Uninstall: `/plugin uninstall mailmate`, then `rm -rf ~/.mailmate-mcp`.
 
+### Claude Cowork (desktop app)
+
+The same plugin works in Cowork on the macOS desktop app — verified end to end, including a from-scratch first run:
+
+1. In Cowork: **Customize → Plugins → + → Add marketplace** → `brianmd/mailmate`, then install **mailmate** from the Discover tab.
+2. Ask Claude about your mail. The first launch provisions the runtime inside Cowork's sandbox, which can take a minute or two, and Cowork will ask you to **allow the connector's commands and file access** — those approvals are the gate to your local mail store.
+3. The Claude desktop app must be running on the Mac where MailMate lives; `send`, `draft`, `modify`, and `open` additionally need the MailMate app running (as always).
+
+Cowork runs the connector through the desktop app's sandboxed bridge, so its provisioning leaves nothing on your real filesystem — not even `~/.mailmate-mcp` (only the Claude Code path creates that directory).
+
 ### One-line installer (any MCP client)
 
 ```bash

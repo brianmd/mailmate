@@ -1,0 +1,10 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Development console: `bin/console` drops into IRB with mailmate loaded.
+
+require "bundler/setup"
+require "mailmate"
+require "irb"
+
+IRB.start(__FILE__)

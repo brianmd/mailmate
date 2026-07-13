@@ -1,0 +1,18 @@
+#!/bin/bash
+# MCP launcher for the Claude Code plugin. Runs the plugin's *bundled* gem
+# source (so plugin users always get exactly the committed code), with Ruby
+# and gem dependencies self-provisioned into ~/.mailmate-mcp on first run.
+#
+# stdout is the MCP JSON-RPC channel — all provisioning output goes to stderr.
+set -euo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+"$here/install.sh" --runtime-only 1>&2
+
+MMHOME="${MAILMATE_MCP_HOME:-$HOME/.mailmate-mcp}"
+RUBY="$(cat "$MMHOME/ruby-path")"
+export GEM_HOME="$MMHOME/gems"
+export GEM_PATH="$MMHOME/gems"
+
+exec "$RUBY" "$here/exe/mailmate-mcp"

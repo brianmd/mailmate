@@ -1,0 +1,18 @@
+{
+  "name": "mailmate",
+  "displayName": "MailMate",
+  "description": "Search, read, tag, archive, draft, and send mail through MailMate on macOS. MCP tools backed by the mailmate gem: quicksearch over the local mail store, clean-markdown message reading, batched state changes with effect verification, and threaded send/draft via emate.",
+  "author": {
+    "name": "Brian Murphy-Dye",
+    "email": "brian@murphydye.com"
+  },
+  "homepage": "https://github.com/brianmd/mailmate",
+  "repository": "https://github.com/brianmd/mailmate",
+  "license": "MIT",
+  "keywords": ["mailmate", "email", "mail", "macos", "mcp"],
+  "mcpServers": {
+    "mailmate": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/mailmate-mcp-launcher"
+    }
+  }
+}

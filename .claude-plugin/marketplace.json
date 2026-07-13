@@ -1,0 +1,15 @@
+{
+  "name": "brianmd",
+  "description": "Brian Murphy-Dye's Claude Code plugins — currently the MailMate mail toolkit for macOS.",
+  "owner": {
+    "name": "Brian Murphy-Dye",
+    "email": "brian@murphydye.com"
+  },
+  "plugins": [
+    {
+      "name": "mailmate",
+      "source": "./",
+      "description": "Search, read, tag, archive, draft, and send mail through MailMate on macOS — MCP tools backed by the mailmate gem. Self-provisions an isolated Ruby runtime on first launch; requires macOS with MailMate installed."
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Mailmate gem configuration. Copy to ~/.config/mailmate/config.yml and edit,
+# or run `mmdiscover` to have it generated for you from MailMate's own
+# Sources.plist and Identities.plist.
+
+# Optional. Override only if MailMate isn't installed at the default location.
+# The loader expands ~ before use.
+# app_support_dir: ~/Library/Application Support/MailMate
+
+# Required for the "is this email mine?" check used by the search CLI's
+# `direction` and `party` output fields. List every address you send mail
+# from across all configured MailMate accounts (Gmail, iCloud, aliases, etc.).
+identities:
+  - me@example.com
+  - me@example.org
+
+# Optional. How to display dates and times in `mmsearch` / `mmmessage`.
+# Unset (default): use the system's local time zone — handles DST automatically.
+# Set to a fixed offset string (e.g. "-07:00" for MST, "-05:00" for EST) to
+# pin a specific zone regardless of the system. IANA names (e.g.
+# "America/Denver") are not supported; use the system zone for DST handling.
+# display_timezone: "-07:00"

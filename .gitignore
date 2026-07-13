@@ -1,0 +1,28 @@
+/.bundle/
+/.yardoc
+/_yardoc/
+/coverage/
+/doc/
+/pkg/
+/spec/reports/
+/tmp/
+
+# Don't commit a built gem from the repo root
+*.gem
+
+# Don't commit any real user config that might land here by accident.
+# Real config lives at ~/.config/mailmate/config.yml; this is just a safety net.
+/config.yml
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.swo
+
+pkg/
+.envrc
+tmp/rubycritic/
+schema/
+admin/
+.obsidian/
+.claude/browser-sessions/

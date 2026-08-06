@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "open3"
+
 module Mailmate
   module CLI
     # `mm-send` — send mail through MailMate's `emate` CLI with a markdown body.
@@ -41,18 +43,37 @@ module Mailmate
 
       PREAMBLE
 
-      # Returns the exit status of the spawned `emate` invocation. Uses
-      # `system` (not `exec`) so the caller — and the test suite — can
-      # actually observe the result.
+      # Returns the exit status of the spawned `emate` invocation.
+      #
+      # emate must NEVER inherit the caller's real stdin/stdout. Inside the
+      # MCP server, fd 0/1 are the JSON-RPC transport, and the previous
+      # `system(...)` handed both to emate: it blocked reading the protocol
+      # pipe for a body and consumed the next frame as one (a cancelled turn
+      # produced a MailMate draft whose entire body was a
+      # `notifications/cancelled` frame — the composed body, swapped in via
+      # the Ruby-level `$stdin` global, was silently discarded). So: read the
+      # body through `$stdin` (honors the MCP's StringIO swap AND a shell
+      # pipe), hand it to emate on a private pipe that capture3 EOFs (no
+      # more hanging until the server dies), and re-emit emate's output
+      # through the `$stdout`/`$stderr` globals so the MCP's capture sees it
+      # instead of the protocol stream getting corrupted.
       def run(argv)
         Mailmate::PlatformError.check_darwin!(component: "mm-send")
         unless File.executable?(EMATE_PATH)
           warn "mm-send: emate not found at #{EMATE_PATH}. Is MailMate installed?"
           return 1
         end
-        warn PREAMBLE if argv.include?("--help") || argv.include?("-h")
-        system(EMATE_PATH, "mailto", "--markup", "markdown", *argv)
-        $?.exitstatus
+        help = argv.include?("--help") || argv.include?("-h")
+        warn PREAMBLE if help
+        # --help never reads a body; consuming stdin here would hang an
+        # interactive `mm-send --help` waiting for Ctrl-D.
+        body = help ? "" : $stdin.read.to_s
+        out, err, status = Open3.capture3(EMATE_PATH, "mailto", "--markup", "markdown", *argv, stdin_data: body)
+        $stdout.write(out)
+        $stderr.write(err)
+        # exitstatus is nil for a signal-killed child; the exe shims do
+        # `exit run(ARGV)`, which needs an Integer.
+        status.exitstatus || 1
       end
     end
   end

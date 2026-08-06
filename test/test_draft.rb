@@ -22,7 +22,7 @@ class TestDraft < Minitest::Test
     Mailmate::CLI::Send.const_set(:EMATE_PATH, "/usr/bin/true")
 
     actual = nil
-    capture_subprocess_io { actual = Mailmate::CLI::Draft.run(["-t", "x@y.z"]) }
+    with_stdin("") { capture_subprocess_io { actual = Mailmate::CLI::Draft.run(["-t", "x@y.z"]) } }
     assert_equal 0, actual
   ensure
     Mailmate::CLI::Send.send(:remove_const, :EMATE_PATH)

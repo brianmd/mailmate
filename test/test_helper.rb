@@ -3,6 +3,7 @@
 $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 
 require "minitest/autorun"
+require "stringio"
 require "mailmate"
 
 module Mailmate
@@ -15,6 +16,18 @@ module Mailmate
 
     def fixture_read(*parts)
       File.read(fixture_path(*parts))
+    end
+
+    # Run a block with `$stdin` swapped to a StringIO — the same swap the MCP
+    # server does around compose calls. CLI::Send reads the body via the
+    # global, so any test that reaches Send.run needs this (or a real pipe)
+    # or it would block reading the test runner's stdin.
+    def with_stdin(text)
+      old = $stdin
+      $stdin = StringIO.new(text)
+      yield
+    ensure
+      $stdin = old
     end
 
     # Run a block with a freshly-loaded Config, optionally with a given YAML

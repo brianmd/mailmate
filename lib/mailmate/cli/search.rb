@@ -71,12 +71,14 @@ module Mailmate
         parser = build_parser(opts)
         parser.parse!(argv)
 
+        self.date_order = opts[:european] ? :dmy : :mdy
+
         search_string = argv[0] || DEFAULT_SEARCH
         # Rewrite Gmail/Outlook-style key:value tokens to their exact
         # quicksearch equivalent — loudly, never silently: every rewrite is
         # announced on stderr so the transcript shows what actually ran (and
         # the caller learns the syntax). stdout stays clean CSV.
-        search_string, translations = Mailmate::SearchSyntax.translate(search_string)
+        search_string, translations = Mailmate::SearchSyntax.translate(search_string, european: !!opts[:european])
         if (notice = Mailmate::SearchSyntax.translation_notice(translations))
           warn notice
         end
@@ -219,6 +221,8 @@ module Mailmate
           o.on("--no-align", "Plain CSV (no column padding)") { opts[:align] = false }
           o.on("--sort MODE", %w[asc desc none],
                "Sort rows by date+time: asc (default), desc, none") { |v| opts[:sort] = v.to_sym }
+          o.on("--european",
+               "Slash dates are day-first: d 9/8/2026 = Aug 9 (default: month-first American)") { opts[:european] = true }
           o.separator ""
           o.separator "SEARCH-STRING SYNTAX"
           o.separator "  Mirrors MailMate's toolbar quicksearch. There is no native key:value"
@@ -439,14 +443,28 @@ module Mailmate
       # converts to the display zone before the day compare. Hour terms
       # (`24h`) compare the same Time as an epoch instant instead.
 
+      # Slash-date ordering for three-part dates with a trailing 4-digit
+      # year: :mdy (American month-first, the default — `8/9/2026` = Aug 9)
+      # or :dmy (day-first, the --european flag — `9/8/2026` = Aug 9).
+      # ISO Y-M-D is unaffected. Module-level because the compiled-range
+      # memo must reset when it flips (the MCP server outlives any one call).
+      def date_order
+        @date_order || :mdy
+      end
+
+      def date_order=(order)
+        @date_order = order
+      end
+
       # Compiled day-range for a date term, memoized per term. nil = term
       # can't match anything. The memo resets when the calendar day rolls
-      # over so relative terms ("1d") stay correct in long-lived processes
-      # (the MCP server).
+      # over (so relative terms like "1d" stay correct in long-lived
+      # processes — the MCP server) or when date_order flips.
       def date_range_for(term)
         today = Date.today
-        if @date_ranges_day != today
+        if @date_ranges_day != today || @date_ranges_order != date_order
           @date_ranges_day = today
+          @date_ranges_order = date_order
           @date_ranges = {}
         end
         return @date_ranges[term] if @date_ranges.key?(term)
@@ -499,12 +517,33 @@ module Mailmate
         end
 
         parts = term.tr("/.", "-").split("-")
-        y = parts[0].to_i
-        return nil if y.zero?
+        return nil unless parts.any? && parts.all? { |p| p.match?(/\A\d+\z/) }
+
         case parts.size
-        when 1 then [y * 10_000 + 101, y * 10_000 + 1231]
-        when 2 then [y * 10_000 + parts[1].to_i * 100 + 1, y * 10_000 + parts[1].to_i * 100 + 31]
-        when 3 then [ymd = y * 10_000 + parts[1].to_i * 100 + parts[2].to_i, ymd]
+        when 1
+          y = parts[0].to_i
+          return nil if y.zero?
+          [y * 10_000 + 101, y * 10_000 + 1231]
+        when 2
+          # Year-first (2026-08) or month-first with a 4-digit year (8/2026).
+          y, m = parts[1].length == 4 ? [parts[1], parts[0]] : [parts[0], parts[1]]
+          y, m = y.to_i, m.to_i
+          return nil if y.zero? || !(1..12).cover?(m)
+          [y * 10_000 + m * 100 + 1, y * 10_000 + m * 100 + 31]
+        when 3
+          # ISO year-first, or slash-date with trailing 4-digit year ordered
+          # per date_order. Impossible calendar dates (2026-02-31, month 13)
+          # compile to nil so date_spec_error names them instead of the
+          # search silently matching nothing.
+          y, m, d =
+            if parts[0].length == 4
+              parts.map(&:to_i)
+            elsif parts[2].length == 4
+              a, b, yr = parts.map(&:to_i)
+              date_order == :dmy ? [yr, b, a] : [yr, a, b]
+            end
+          return nil unless y && Date.valid_date?(y, m, d)
+          [ymd = y * 10_000 + m * 100 + d, ymd]
         end
       end
 
@@ -523,7 +562,7 @@ module Mailmate
           next unless field == :date
           range = hour_range_for(term) || date_range_for(term)
           if range.nil? || range[0] > range[1]
-            return "date term cannot match anything: d #{term}"
+            return "date term cannot match anything: d #{term}#{date_term_hint(term)}"
           end
           next if negate
           (term.end_with?("h") ? hour_terms : day_terms) << [term, range]
@@ -541,6 +580,20 @@ module Mailmate
           return "impossible date range (empty intersection): #{family.map { |t, _| "d #{t}" }.join(" ")}"
         end
         nil
+      end
+
+      # `13/8/2026` under month-first ordering is month 13 — almost certainly
+      # a day-first date (and vice versa). Name the likely fix instead of
+      # leaving the generic cannot-match.
+      def date_term_hint(term)
+        parts = term.sub(/\A(>=|<=|>|<)/, "").tr("/.", "-").split("-")
+        return nil unless parts.size == 3 && parts[2].length == 4
+        a, b = parts[0].to_i, parts[1].to_i
+        if date_order == :mdy && a > 12 && (1..12).cover?(b)
+          " (day-first date? pass --european)"
+        elsif date_order == :dmy && b > 12 && (1..12).cover?(a)
+          " (month-first date? drop --european)"
+        end
       end
 
       def ymd_int(d)

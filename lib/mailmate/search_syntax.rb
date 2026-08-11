@@ -48,6 +48,7 @@ module Mailmate
       "Prefix an operand with ! to negate: f !smith = from does NOT contain smith.",
       "Negation works on dates too: d !3d = received MORE than 3 days ago.",
       "Absolute dates compare: d >2026-08 (after Aug), d <2026-08 (before), also >= <=.",
+      "Slash dates are month-first American: d 8/9/2026 = Aug 9 (day-first: --european).",
       "An impossible date combination (d >2026 d <2025) is an error, not 0 results.",
     ].freeze
 
@@ -128,10 +129,10 @@ module Mailmate
     # Only rewrites where the equivalence is exact. A foreign key whose value
     # can't be translated faithfully (`after:8am`, `date:next week`) stays in
     # the query as literal text, and zero_result_hint still flags it there.
-    def translate(query, today: Date.today)
+    def translate(query, today: Date.today, european: false)
       notes = []
       translated = query.to_s.gsub(TOKEN_RX) do |token|
-        replacement = translate_token(token, today)
+        replacement = translate_token(token, today, european)
         notes << [token, replacement] if replacement
         replacement || token
       end
@@ -194,7 +195,7 @@ module Mailmate
 
     # nil = not a rewritable token (not key:value, unknown key, or a value
     # with no faithful equivalent).
-    def translate_token(token, today)
+    def translate_token(token, today, european = false)
       m = token.match(/\A(?<neg>[-!])?(?<key>[A-Za-z_]+):(?<value>.+)\z/m)
       return nil unless m
 
@@ -217,13 +218,13 @@ module Mailmate
 
       case key
       when "date", "on", "sent", "received", "time"
-        translate_point_date(value, today)
+        translate_point_date(value, today, european)
       when "after", "since"
-        translate_after(value, today)
+        translate_after(value, today, european)
       when "before"
-        translate_before(value, today, "<")
+        translate_before(value, today, "<", european)
       when "until"
-        translate_before(value, today, "<=")
+        translate_before(value, today, "<=", european)
       when "newer_than", "newer"
         (rel = parse_relative(value)) && "d #{rel}"
       when "older_than", "older"
@@ -240,40 +241,40 @@ module Mailmate
 
     # A day-, month-, or year-precision point in time. `d <period>` matches
     # exactly that period in the engine, so these are exact.
-    def translate_point_date(value, today)
+    def translate_point_date(value, today, european = false)
       v = value.downcase
       return "d 1d" if v == "today"
       return "d #{(today - 1).strftime("%Y-%m-%d")}" if v == "yesterday"
       # `date:8/10/2026-today` (seen in real transcripts): a range whose end
       # is now IS an after-window.
-      return translate_after(v.delete_suffix("-today"), today) if v.end_with?("-today")
+      return translate_after(v.delete_suffix("-today"), today, european) if v.end_with?("-today")
       return "d #{v}" if v =~ /\A\d+[dwmy]\z/
 
-      (period = normalize_period(v)) && "d #{period}"
+      (period = normalize_period(v, european)) && "d #{period}"
     end
 
     # Gmail's after: includes the named day; since: likewise → >=.
-    def translate_after(value, today)
+    def translate_after(value, today, european = false)
       v = value.downcase
       return "d 1d" if v == "today"
       return "d 2d" if v == "yesterday"
 
-      (period = normalize_period(v)) && "d >=#{period}"
+      (period = normalize_period(v, european)) && "d >=#{period}"
     end
 
     # Gmail's before: excludes the named day → <. until: includes it → <=.
-    def translate_before(value, today, op)
+    def translate_before(value, today, op, european = false)
       v = value.downcase
       v = today.strftime("%Y-%m-%d") if v == "today"
       v = (today - 1).strftime("%Y-%m-%d") if v == "yesterday"
 
-      (period = normalize_period(v)) && "d #{op}#{period}"
+      (period = normalize_period(v, european)) && "d #{op}#{period}"
     end
 
     # "2026", "2026-05", "2026-03-05", "3/5/2026", "2026/3/5" → the
     # normalized absolute period string quicksearch expects, or nil.
-    def normalize_period(value)
-      if (day = parse_day(value))
+    def normalize_period(value, european = false)
+      if (day = parse_day(value, european))
         day.strftime("%Y-%m-%d")
       elsif value =~ %r{\A(\d{4})[-/.](\d{1,2})\z}
         format("%04d-%02d", Regexp.last_match(1).to_i, Regexp.last_match(2).to_i)
@@ -288,9 +289,10 @@ module Mailmate
       value =~ /\A(\d+)\s*([dwmy])\z/ ? "#{Regexp.last_match(1)}#{Regexp.last_match(2)}" : nil
     end
 
-    # Y-M-D (any of - / . separators) or US M/D/Y. Two-digit years are
-    # ambiguous across dialects — refused rather than guessed.
-    def parse_day(value)
+    # Y-M-D (any of - / . separators), or slash-dates with a trailing
+    # 4-digit year — US M/D/Y by default, D/M/Y when european. Two-digit
+    # years are ambiguous across dialects — refused rather than guessed.
+    def parse_day(value, european = false)
       parts = value.split(%r{[-/.]})
       return nil unless parts.size == 3 && parts.all? { |p| p =~ /\A\d+\z/ }
 
@@ -298,7 +300,7 @@ module Mailmate
         if parts[0].length == 4
           [parts[0], parts[1], parts[2]]
         elsif parts[2].length == 4
-          [parts[2], parts[0], parts[1]]
+          european ? [parts[2], parts[1], parts[0]] : [parts[2], parts[0], parts[1]]
         end
       return nil unless y
 

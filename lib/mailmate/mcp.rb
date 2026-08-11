@@ -121,6 +121,7 @@ module Mailmate
             limit: { type: "integer", description: "Stop after N matches." },
             headers_only: { type: "boolean", description: "Skip body matching (much faster on text searches)." },
             sort: { type: "string", enum: %w[asc desc none], description: "Sort by date+time. Default: asc." },
+            european: { type: "boolean", description: "Slash dates in the query are day-first (d 9/8/2026 = Aug 9). Default: month-first American." },
           },
           additionalProperties: false,
         },
@@ -413,6 +414,7 @@ module Mailmate
       argv.push("--limit",   args["limit"].to_i.to_s) if args["limit"]
       argv.push("--headers-only")                    if args["headers_only"]
       argv.push("--sort",    args["sort"].to_s)      if args["sort"]
+      argv.push("--european")                        if args["european"]
       # Positionals: search-string then fields. Only include if the caller
       # gave us either — otherwise let the CLI apply its defaults.
       if args.key?("query") || args["fields"]

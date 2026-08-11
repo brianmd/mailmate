@@ -144,6 +144,11 @@ class TestSearchSyntax < Minitest::Test
     assert_equal "d >=2026-08-10", translated("date:8/10/2026-today")
   end
 
+  def test_translates_day_first_slash_dates_when_european
+    assert_equal "d 2026-08-09", S.translate("date:9/8/2026", today: TODAY, european: true).first
+    assert_equal "d <2026-08-09", S.translate("before:9/8/2026", today: TODAY, european: true).first
+  end
+
   def test_translates_after_before_until_as_comparisons
     assert_equal "d >=2026-08-01", translated("after:2026-08-01")
     assert_equal "d >=2026-08-01", translated("since:8/1/2026")

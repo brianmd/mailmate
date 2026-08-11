@@ -179,6 +179,47 @@ class TestCliSearch < Minitest::Test
     refute S.date_matches?(mail, nil, "2025-06-16")
   end
 
+  def test_date_matches_slash_dates_month_first_by_default
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
+    assert S.date_matches?(mail, nil, "6/15/2025")
+    assert S.date_matches?(mail, nil, "6/2025")
+    refute S.date_matches?(mail, nil, "7/15/2025")
+    # 15/6/2025 is month 15 under M/D/Y — an invalid date, not a match.
+    refute S.date_matches?(mail, nil, "15/6/2025")
+  end
+
+  def test_date_matches_slash_dates_day_first_when_european
+    S.date_order = :dmy
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
+    assert S.date_matches?(mail, nil, "15/6/2025")
+    refute S.date_matches?(mail, nil, "15/7/2025")
+  ensure
+    S.date_order = :mdy
+  end
+
+  def test_date_order_flip_resets_the_range_memo
+    mail = make_mail(date: Time.utc(2025, 3, 5, 12))
+    S.date_order = :mdy
+    assert S.date_matches?(mail, nil, "3/5/2025")  # March 5 (memoized)
+    S.date_order = :dmy
+    refute S.date_matches?(mail, nil, "3/5/2025")  # now May 3
+  ensure
+    S.date_order = :mdy
+  end
+
+  def test_date_spec_error_flags_impossible_calendar_dates
+    ["d 2026-02-31", "d 2026-13", "d 2026-13-05"].each do |q|
+      err = S.date_spec_error(S.parse_search(q).first)
+      refute_nil err, "expected #{q.inspect} to error"
+      assert_includes err, "cannot match"
+    end
+  end
+
+  def test_date_spec_error_hints_at_day_first_ordering
+    err = S.date_spec_error(S.parse_search("d 13/8/2026").first)
+    assert_includes err, "--european"
+  end
+
   def test_date_matches_day_in_display_zone_not_senders
     # 2am UTC is the previous evening anywhere west of UTC. Whatever day
     # localize says a message displays under is the day a search must find

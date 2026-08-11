@@ -111,9 +111,18 @@ module Mailmate
         end
 
         specs = order_specs(parse_search(search_string))
-        if (date_err = date_spec_error(specs))
-          warn date_err
-          return 2
+        # Validate date specs per or-group: only when EVERY branch is
+        # unsatisfiable is the query itself an error. A single dead branch
+        # in a multi-branch query gets a warning — the other branches still
+        # mean something, and the dead one silently contributing nothing is
+        # exactly the failure mode this validation exists to surface.
+        date_errs = specs.filter_map { |group| date_spec_error(group) }
+        if date_errs.any?
+          if date_errs.size == specs.size
+            warn date_errs.first
+            return 2
+          end
+          date_errs.each { |e| warn "dead or-branch (matches nothing): #{e}" }
         end
 
         # Compose + parse the smart-mailbox filter exactly once. The same AST
@@ -313,6 +322,13 @@ module Mailmate
       # ---- search-string parsing ----------------------------------------------
 
       def tokenize(str)
+        tokenize_q(str).map(&:first)
+      end
+
+      # [text, quoted] pairs — quoted-ness must survive tokenization so a
+      # deliberate search for the literal word "or" (`s "or"`) is not taken
+      # as the group separator, and a quoted "f" is never read as a modifier.
+      def tokenize_q(str)
         tokens = []
         i = 0
         while i < str.length
@@ -321,42 +337,72 @@ module Mailmate
             i += 1
           elsif c == "\""
             j = str.index("\"", i + 1) || str.length
-            tokens << str[(i + 1)...j]
+            tokens << [str[(i + 1)...j], true]
             i = j + 1
           else
             j = i
             j += 1 while j < str.length && str[j] != " "
-            tokens << str[i...j]
+            tokens << [str[i...j], false]
             i = j
           end
         end
         tokens
       end
 
+      # A bare `or` splits the query into groups: specs within a group AND
+      # together, groups OR together — `and` (juxtaposition) binds tighter
+      # than `or`, and there are no parens: `(f bob or f ann) s invoice` is
+      # written out as `f bob s invoice or f ann s invoice`. A group that
+      # OPENS with a bare unquoted operand inherits the modifier in force at
+      # the end of the previous group — the app's `d 2024 or 2025 or 2y`
+      # shorthand. Returns an array of spec groups; empty groups (a dangling
+      # `or`) are dropped.
       def parse_search(str)
-        tokens = tokenize(str)
+        token_groups = [[]]
+        tokenize_q(str).each do |tok, quoted|
+          if !quoted && tok.casecmp?("or")
+            token_groups << []
+          else
+            token_groups.last << [tok, quoted]
+          end
+        end
+
+        carried = nil
+        groups = token_groups.map do |tokens|
+          specs, carried = parse_group(tokens, carried)
+          specs
+        end
+        groups.reject(&:empty?)
+      end
+
+      def parse_group(tokens, inherited_field)
         specs = []
+        in_force = inherited_field
         i = 0
         while i < tokens.size
-          tok = tokens[i]
-          field = MODIFIERS[tok]
+          tok, quoted = tokens[i]
+          field = quoted ? nil : MODIFIERS[tok]
           if field && i + 1 < tokens.size
-            operand = tokens[i + 1]
+            operand, = tokens[i + 1]
             negate = operand.start_with?("!")
             operand = operand[1..] if negate
             specs << [field, operand.downcase, negate]
+            in_force = field
             i += 2
           else
             negate = tok.start_with?("!")
             operand = negate ? tok[1..] : tok
-            # Bare terms default to MailMate's "Common" specifier — common
-            # headers OR body — matching the UI quicksearch behavior. Pass
-            # --headers-only to skip the body scan when speed matters.
-            specs << [:message_or_body, operand.downcase, negate]
+            # A bare term opening an or-group inherits the modifier in force
+            # (`d 2024 or 2025`). Elsewhere it is MailMate's "Common"
+            # specifier — common headers OR body — matching the UI
+            # quicksearch behavior. Pass --headers-only to skip the body scan
+            # when speed matters.
+            target = (i.zero? && !quoted && in_force) ? in_force : :message_or_body
+            specs << [target, operand.downcase, negate]
             i += 1
           end
         end
-        specs
+        [specs, in_force]
       end
 
       # Static cost rank per spec field for AND evaluation order: compiled
@@ -369,13 +415,16 @@ module Mailmate
         body: 2, message_or_body: 2,
       }.freeze
 
-      # Evaluate cheap, selective specs before expensive ones. specs combine
-      # with AND (order-independent), and matches? short-circuits on the
-      # first miss — so `b invoice d 7d` should date-reject 47k messages
-      # before body matching ever runs, not after. Stable within a cost rank
-      # to keep the user's order deterministic.
-      def order_specs(specs)
-        specs.sort_by.with_index { |(field, _term, _negate), i| [SPEC_COST.fetch(field, 1), i] }
+      # Evaluate cheap, selective specs before expensive ones, within each
+      # or-group. Specs in a group combine with AND (order-independent), and
+      # matches? short-circuits on the first miss — so `b invoice d 7d`
+      # should date-reject 47k messages before body matching ever runs, not
+      # after. Stable within a cost rank to keep the user's order
+      # deterministic.
+      def order_specs(groups)
+        groups.map do |specs|
+          specs.sort_by.with_index { |(field, _term, _negate), i| [SPEC_COST.fetch(field, 1), i] }
+        end
       end
 
       # ---- date matching ------------------------------------------------------
@@ -459,14 +508,15 @@ module Mailmate
         end
       end
 
-      # Usage-error string for the date specs in `specs`, nil when they're
-      # fine. Two failure classes, both of which would otherwise surface as a
-      # clean, successful, empty result — the silent-nothing this gem keeps
-      # having to fight: a single term that cannot match anything (`d >3d`,
-      # `d garbage`), and positive terms whose windows don't intersect
-      # (`d >2026 d <2025` — specs AND together, so the combination is
-      # unsatisfiable). Negated terms subtract rather than intersect, so
-      # they're validated individually but excluded from the intersection.
+      # Usage-error string for the date specs in ONE or-group (specs within a
+      # group AND together; the caller decides how errors across groups
+      # combine), nil when they're fine. Two failure classes, both of which
+      # would otherwise surface as a clean, successful, empty result — the
+      # silent-nothing this gem keeps having to fight: a single term that
+      # cannot match anything (`d >3d`, `d garbage`), and positive terms
+      # whose windows don't intersect (`d >2026 d <2025`). Negated terms
+      # subtract rather than intersect, so they're validated individually
+      # but excluded from the intersection.
       def date_spec_error(specs)
         day_terms, hour_terms = [], []
         specs.each do |field, term, negate|
@@ -723,26 +773,28 @@ module Mailmate
         texts
       end
 
-      def matches?(mail, eml_id, specs, headers_only, path = nil, index_only: false, exclude_quoted: false)
-        specs.all? do |field, term, negate|
-          term_b = term.b
-          hit =
-            case field
-            when :from, :recipients, :cc, :subject, :address_any
-              field_value(eml_id, mail, field).include?(term_b)
-            when :tag, :keyword
-              tag_value(eml_id).include?(term_b)
-            when :body
-              headers_only ? false : body_matches?(eml_id, mail, path, term, term_b, index_only: index_only, exclude_quoted: exclude_quoted)
-            when :message_or_body
-              common = %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
-              common || (!headers_only && body_matches?(eml_id, mail, path, term, term_b, index_only: index_only, exclude_quoted: exclude_quoted))
-            when :date
-              date_matches?(mail, eml_id, term)
-            when :any
-              %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
-            end
-          negate ? !hit : hit
+      def matches?(mail, eml_id, groups, headers_only, path = nil, index_only: false, exclude_quoted: false)
+        groups.any? do |specs|
+          specs.all? do |field, term, negate|
+            term_b = term.b
+            hit =
+              case field
+              when :from, :recipients, :cc, :subject, :address_any
+                field_value(eml_id, mail, field).include?(term_b)
+              when :tag, :keyword
+                tag_value(eml_id).include?(term_b)
+              when :body
+                headers_only ? false : body_matches?(eml_id, mail, path, term, term_b, index_only: index_only, exclude_quoted: exclude_quoted)
+              when :message_or_body
+                common = %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
+                common || (!headers_only && body_matches?(eml_id, mail, path, term, term_b, index_only: index_only, exclude_quoted: exclude_quoted))
+              when :date
+                date_matches?(mail, eml_id, term)
+              when :any
+                %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
+              end
+            negate ? !hit : hit
+          end
         end
       end
 

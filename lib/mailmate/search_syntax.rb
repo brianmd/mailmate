@@ -36,12 +36,15 @@ module Mailmate
       ["d 1d",                    "received today (the default); d 2d = yesterday + today"],
       ["d 24h",                   "received in the last 24 hours (rolling, not calendar)"],
       ["d >=2026-05 d <2026-08",  "received May through July 2026"],
+      ["d 1h or 2026-08-09",      "last hour, plus everything from Aug 9"],
       ["T urgent",                "tagged 'urgent'"],
     ].freeze
 
     RULES = [
-      "Specs combine with AND (no or/parens yet).",
-      "Wrap multi-word terms in \"double quotes\".",
+      "Specs combine with AND; `or` separates alternatives, and AND binds tighter",
+      "(no parens): (f bob or f ann) s invoice = f bob s invoice or f ann s invoice.",
+      "After `or`, a bare first term inherits the modifier in force: d 2024 or 2025.",
+      "Wrap multi-word terms in \"double quotes\" (also how to search the word \"or\").",
       "Prefix an operand with ! to negate: f !smith = from does NOT contain smith.",
       "Negation works on dates too: d !3d = received MORE than 3 days ago.",
       "Absolute dates compare: d >2026-08 (after Aug), d <2026-08 (before), also >= <=.",

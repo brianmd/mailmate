@@ -38,48 +38,115 @@ class TestCliSearch < Minitest::Test
   end
 
   # ---- parse_search ----
+  #
+  # parse_search returns an array of or-groups, each an array of specs.
+  # A single-group query is [[spec, ...]].
 
   def test_parse_search_bare_term_routes_to_message_or_body
     # Post-fix default: bare tokens match MailMate UI's "Common" specifier
     # (headers OR body). See cli/search.rb parse_search.
     specs = S.parse_search("hello")
-    assert_equal [[:message_or_body, "hello", false]], specs
+    assert_equal [[[:message_or_body, "hello", false]]], specs
   end
 
   def test_parse_search_with_modifier
     specs = S.parse_search("f freron")
-    assert_equal [[:from, "freron", false]], specs
+    assert_equal [[[:from, "freron", false]]], specs
   end
 
   def test_parse_search_subject_modifier
     specs = S.parse_search("s digest")
-    assert_equal [[:subject, "digest", false]], specs
+    assert_equal [[[:subject, "digest", false]]], specs
   end
 
   def test_parse_search_negation_with_modifier
     specs = S.parse_search("f !smith")
-    assert_equal [[:from, "smith", true]], specs
+    assert_equal [[[:from, "smith", true]]], specs
   end
 
   def test_parse_search_negation_on_bare_term
     specs = S.parse_search("!spam")
-    assert_equal [[:message_or_body, "spam", true]], specs
+    assert_equal [[[:message_or_body, "spam", true]]], specs
   end
 
   def test_parse_search_multiple_specs
     specs = S.parse_search("f alice s urgent")
-    assert_equal [[:from, "alice", false], [:subject, "urgent", false]], specs
+    assert_equal [[[:from, "alice", false], [:subject, "urgent", false]]], specs
   end
 
   def test_parse_search_modifier_at_end_falls_through
     # A modifier with no following operand becomes a bare term.
     specs = S.parse_search("f")
-    assert_equal [[:message_or_body, "f", false]], specs
+    assert_equal [[[:message_or_body, "f", false]]], specs
   end
 
   def test_parse_search_lowercases_terms
     specs = S.parse_search("URGENT")
-    assert_equal "urgent", specs.first[1]
+    assert_equal "urgent", specs.first.first[1]
+  end
+
+  # ---- parse_search: or-groups ----
+
+  def test_parse_search_or_splits_groups_and_binds_looser_than_and
+    specs = S.parse_search("f bob s invoice or f ann s invoice")
+    assert_equal [
+      [[:from, "bob", false], [:subject, "invoice", false]],
+      [[:from, "ann", false], [:subject, "invoice", false]],
+    ], specs
+  end
+
+  def test_parse_search_or_group_opening_bare_term_inherits_modifier
+    # The app's `d 2024 or 2025 or 2y` shorthand: the modifier in force
+    # carries across `or` when the next group opens with a bare term.
+    specs = S.parse_search("d 2024 or 2025 or 2y")
+    assert_equal [
+      [[:date, "2024", false]],
+      [[:date, "2025", false]],
+      [[:date, "2y", false]],
+    ], specs
+  end
+
+  def test_parse_search_or_inheritance_uses_last_modifier_in_force
+    specs = S.parse_search("f bob d 1h or 2026-08-09")
+    assert_equal [
+      [[:from, "bob", false], [:date, "1h", false]],
+      [[:date, "2026-08-09", false]],
+    ], specs
+  end
+
+  def test_parse_search_or_only_first_bare_term_inherits
+    specs = S.parse_search("d 2024 or 2025 invoice")
+    assert_equal [
+      [[:date, "2024", false]],
+      [[:date, "2025", false], [:message_or_body, "invoice", false]],
+    ], specs
+  end
+
+  def test_parse_search_quoted_or_is_a_literal_term
+    assert_equal [[[:subject, "or", false]]], S.parse_search('s "or"')
+    assert_equal [[[:message_or_body, "or", false]]], S.parse_search('"or"')
+  end
+
+  def test_parse_search_quoted_group_opener_does_not_inherit
+    specs = S.parse_search('d 2024 or "2025"')
+    assert_equal [
+      [[:date, "2024", false]],
+      [[:message_or_body, "2025", false]],
+    ], specs
+  end
+
+  def test_parse_search_dangling_or_drops_empty_group
+    assert_equal [[[:from, "bob", false]]], S.parse_search("f bob or")
+    assert_equal [[[:from, "bob", false]]], S.parse_search("or f bob")
+    assert_equal [], S.parse_search("or")
+  end
+
+  def test_matches_any_or_group_suffices
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
+    hit  = S.order_specs(S.parse_search("f a@b.com or f nobody"))
+    miss = S.order_specs(S.parse_search("f nobody or f also-nobody"))
+    assert S.matches?(mail, nil, hit, true)
+    refute S.matches?(mail, nil, miss, true)
   end
 
   # ---- date_matches? ----
@@ -182,7 +249,7 @@ class TestCliSearch < Minitest::Test
   # ---- date_spec_error ----
 
   def test_date_spec_error_flags_empty_intersection
-    specs = S.parse_search("d >2026 d <2025")
+    specs = S.parse_search("d >2026 d <2025").first
     err = S.date_spec_error(specs)
     assert_includes err, "impossible date range"
     assert_includes err, "d >2026"
@@ -193,21 +260,21 @@ class TestCliSearch < Minitest::Test
     # Nothing is after a window that already extends to the future, and a
     # zero-length window contains nothing.
     ["d >3d", "d >1h", "d 0d", "d 0h"].each do |q|
-      err = S.date_spec_error(S.parse_search(q))
+      err = S.date_spec_error(S.parse_search(q).first)
       refute_nil err, "expected #{q.inspect} to error"
       assert_includes err, "cannot match"
     end
   end
 
   def test_date_spec_error_accepts_valid_combinations
-    assert_nil S.date_spec_error(S.parse_search("d >=2026-05 d <2026-08"))
-    assert_nil S.date_spec_error(S.parse_search("d 2026 d 2026-05"))
-    assert_nil S.date_spec_error(S.parse_search("f bob s invoice"))
-    assert_nil S.date_spec_error(S.parse_search("d 24h"))
+    assert_nil S.date_spec_error(S.parse_search("d >=2026-05 d <2026-08").first)
+    assert_nil S.date_spec_error(S.parse_search("d 2026 d 2026-05").first)
+    assert_nil S.date_spec_error(S.parse_search("f bob s invoice").first)
+    assert_nil S.date_spec_error(S.parse_search("d 24h").first)
     # Negated windows subtract, not intersect — never "impossible".
-    assert_nil S.date_spec_error(S.parse_search("d 2y d !3d"))
+    assert_nil S.date_spec_error(S.parse_search("d 2y d !3d").first)
     # Day and hour windows are different scales; no cross-family check.
-    assert_nil S.date_spec_error(S.parse_search("d 24h d 2026"))
+    assert_nil S.date_spec_error(S.parse_search("d 24h d 2026").first)
   end
 
   # ---- exclude_quoted threading ----
@@ -238,8 +305,8 @@ class TestCliSearch < Minitest::Test
     # (the no-body-indexes fallback) so the stub below is authoritative.
     S.stub(:body_candidates, nil) do
       S.stub(:body_index_records, stub_records) do
-        assert S.matches?(nil, "42", [[:body, "junk", false]], false, "/nope", index_only: true)
-        refute S.matches?(nil, "42", [[:body, "junk", false]], false, "/nope", index_only: true, exclude_quoted: true)
+        assert S.matches?(nil, "42", [[[:body, "junk", false]]], false, "/nope", index_only: true)
+        refute S.matches?(nil, "42", [[[:body, "junk", false]]], false, "/nope", index_only: true, exclude_quoted: true)
       end
     end
     assert_equal [false, true], seen
@@ -291,15 +358,15 @@ class TestCliSearch < Minitest::Test
     # so we know body filters work with no preloaded mail.
     S.stub(:body_candidates, nil) do
       S.stub(:body_index_records, ["needle in haystack"]) do
-        assert S.matches?(nil, "42", [[:body, "needle", false]], false, "/nope.eml")
-        refute S.matches?(nil, "42", [[:body, "missing", false]], false, "/nope.eml")
+        assert S.matches?(nil, "42", [[[:body, "needle", false]]], false, "/nope.eml")
+        refute S.matches?(nil, "42", [[[:body, "missing", false]]], false, "/nope.eml")
       end
     end
   end
 
   def test_matches_body_respects_headers_only_short_circuit
     # headers_only=true means body matchers always fail without touching the index/mail.
-    refute S.matches?(nil, "42", [[:body, "anything", false]], true, "/nope.eml")
+    refute S.matches?(nil, "42", [[[:body, "anything", false]]], true, "/nope.eml")
   end
 
   # ---- --index-only short-circuits the fallback ----
@@ -331,7 +398,7 @@ class TestCliSearch < Minitest::Test
   def test_matches_body_with_index_only_finds_indexed_message
     S.stub(:body_candidates, nil) do
       S.stub(:body_index_records, ["found this in the index"]) do
-        assert S.matches?(nil, "42", [[:body, "found this", false]], false, "/nope.eml", index_only: true)
+        assert S.matches?(nil, "42", [[[:body, "found this", false]]], false, "/nope.eml", index_only: true)
       end
     end
   end
@@ -344,9 +411,9 @@ class TestCliSearch < Minitest::Test
       File.write(eml, "From: a@b\nSubject: s\nDate: #{Time.now.rfc2822}\n\nWOULD HAVE MATCHED")
       S.stub(:body_candidates, nil) do
         S.stub(:body_index_records, []) do
-          refute S.matches?(nil, "42", [[:body, "would have matched", false]], false, eml, index_only: true)
+          refute S.matches?(nil, "42", [[[:body, "would have matched", false]]], false, eml, index_only: true)
           # Same query without index_only DOES find it via the lazy fallback.
-          assert S.matches?(nil, "42", [[:body, "would have matched", false]], false, eml)
+          assert S.matches?(nil, "42", [[[:body, "would have matched", false]]], false, eml)
         end
       end
     end

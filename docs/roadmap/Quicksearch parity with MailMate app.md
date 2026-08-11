@@ -8,14 +8,14 @@ closed_date:
 
 # Quicksearch parity with MailMate app
 
-## Status: 🟡 in progress (phase 1 shipped 2026-08-11; phases 2–4 idea)
+## Status: 🟡 in progress (phases 1–2 shipped 2026-08-11; phases 3–4 idea)
 
 ## Progress
 
 | Phase | Scope | Status | Shipped |
 |-------|-------|--------|---------|
 | [[#Phase 1 — Date comparisons (`d <2026-08`, `d >2026-08`)|1]] | absolute date ranges | ✅ Done | 2026-08-11 |
-| [[#Phase 2 — Boolean OR (and binds tighter, no parens)|2]] | `f bob s invoice or f ann s invoice` | 🕓 Pending | — |
+| [[#Phase 2 — Boolean OR (and binds tighter, no parens)|2]] | `f bob s invoice or f ann s invoice` | ✅ Done | 2026-08-11 |
 | [[#Phase 3 — Arbitrary header specs|3]] | `delivered-to:joe`, `x-mailer.name:mailmate` | 🕓 Pending | — |
 | [[#Phase 4 — Message-state specs (unread, flagged, attachments)|4]] | quicksearch equivalents for `is:` / `has:` | 🕓 Pending | — |
 
@@ -41,11 +41,11 @@ Translator upgrades landed in the same change: `before:X` → `d <X`, `until:X` 
 
 ## Phase 2 — Boolean OR (and binds tighter, no parens)
 
-The app accepts `d 2024 or 2025 or 2y`; the gem is AND-only (`RULES` says so explicitly). Specs are a flat `[[field, term, negate], ...]` evaluated with `specs.all?`.
+**Shipped 2026-08-11**, same day the decision was made (prompted by real queries — `d 1h or 2026-08-09` — hitting the AND-only engine and drawing spurious impossible-range errors). As decided: no expression tree, no parens. `or` is a top-level disjunction over AND-groups — `and` (juxtaposition) binds tighter — with `(f bob or f ann) s invoice` written out as `f bob s invoice or f ann s invoice`. `parse_search` now returns a list of groups (tokenizer keeps quoted-ness so `s "or"` stays a literal term), `matches?` is any-group-matches with `order_specs`' cost-ranked short-circuiting intact per group.
 
-**Decided 2026-08-11:** forego the full expression tree and parens. `or` becomes a top-level disjunction over AND-groups — `and` (juxtaposition) binds tighter than `or` — accepting wordier queries as the price: `(f bob or f ann) s invoice` is written `f bob s invoice or f ann s invoice`. This keeps the representation a list-of-lists (split the token stream on `or`, parse each side exactly as today) and `matches?` becomes "any group matches", with `order_specs`' cost-ranked short-circuiting applied per group unchanged. The app's `d 2024 or 2025 or 2y` form (modifier distributing over bare operands) needs a decision at implementation time: either require the modifier repeated (`d 2024 or d 2025`) or let a group that opens with a bare term inherit the previous group's leading modifier — verify what the app actually does first.
+The modifier-distribution question resolved toward the app's shorthand: a group that **opens with a bare unquoted term inherits the modifier in force** at the end of the previous group, so `d 2024 or 2025 or 2y` and `d 1h or 2026-08-09` work; a quoted opener (`d 2024 or "2025"`) stays a literal Common-specifier term.
 
-Note for `date_spec_error` (shipped in phase 1): with OR groups it must validate per group — an impossible intersection in one branch doesn't invalidate the query, though it does make that branch dead weight worth warning about.
+`date_spec_error` went per-group: every branch dead → usage error (exit 2) as before; one dead branch among live ones → a `dead or-branch (matches nothing): …` stderr warning while the live branches run.
 
 ## Phase 3 — Arbitrary header specs
 
@@ -64,4 +64,4 @@ Not in the user-reported gap list, but it is the remaining untranslatable-foreig
 
 ## Recommendation
 
-Phase 1 first — smallest change, immediately improves translator output readability, and its inclusivity decision is prerequisite thinking for Phase 2's date examples anyway. *(Done 2026-08-11.)* Phase 3 is the largest payoff (it dissolves the literal-text trap entirely) but has the widest blast radius through the translator contract; do it next while the range semantics are fresh. Phases 2 and 4 are independent and can wait for demand.
+Phase 1 first — smallest change, immediately improves translator output readability, and its inclusivity decision is prerequisite thinking for Phase 2. *(Both done 2026-08-11.)* Phase 3 is the largest payoff (it dissolves the literal-text trap entirely) but has the widest blast radius through the translator contract; do it next while the range semantics are fresh. Phase 4 can wait for demand.

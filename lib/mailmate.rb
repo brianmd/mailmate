@@ -50,6 +50,7 @@ require_relative "mailmate/mailbox_graph"
 require_relative "mailmate/source_resolver"
 require_relative "mailmate/var_resolver"
 require_relative "mailmate/filter_classifier"
+require_relative "mailmate/search_syntax"
 
 module Mailmate
   # First-run bootstrap. If ~/.config/mailmate/config.yml is missing,

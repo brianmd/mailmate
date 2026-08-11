@@ -142,6 +142,15 @@ module Mailmate
 
         sort_rows!(rows, opts[:sort])
         emit_output(rows, fields, opts)
+        # A query written in another mail system's dialect is not a syntax
+        # error here — it parses as a literal term and quietly matches
+        # nothing. Callers (people and agents alike) read that empty result
+        # as "no such mail" and stop. Say so on stderr, so stdout stays
+        # clean CSV and the exit status stays 0: the search DID run, it just
+        # cannot have found what the caller meant.
+        if rows.empty? && (hint = Mailmate::SearchSyntax.zero_result_hint(search_string))
+          warn hint
+        end
         0
       end
 
@@ -191,24 +200,10 @@ module Mailmate
                "Sort rows by date+time: asc (default), desc, none") { |v| opts[:sort] = v.to_sym }
           o.separator ""
           o.separator "SEARCH-STRING SYNTAX"
-          o.separator "  Mirrors MailMate's toolbar quicksearch. Specs combine with AND."
-          o.separator "  Wrap multi-word terms in \"double quotes\". Prefix operand with ! to negate."
-          o.separator ""
-          o.separator "    <term>    common headers (from/to/cc/subject) OR body contains <term>"
-          o.separator "    f <term>  from contains"
-          o.separator "    t <term>  to/cc (recipients) contains"
-          o.separator "    c <term>  cc contains"
-          o.separator "    s <term>  subject contains"
-          o.separator "    a <term>  any address header contains"
-          o.separator "    b <term>  body contains (reads MailMate's body indexes; --all for un-indexed too)"
-          o.separator "    m <term>  common headers OR body (same as bare term)"
-          o.separator "    d <date>  received date: Nd|Nw|Nm|Ny (relative), or Y, Y-M, Y-M-D"
-          o.separator "    T <tag>   tag / IMAP keyword contains  (K is a synonym)"
-          o.separator ""
-          o.separator "  Examples:"
-          o.separator "    mmsearch 'f substack d 7d'         from Substack in last 7 days"
-          o.separator "    mmsearch 's \"invoice due\" !draft'  subject has invoice due, no 'draft'"
-          o.separator "    mmsearch 'd 2026-05'               received in May 2026"
+          o.separator "  Mirrors MailMate's toolbar quicksearch. There is no key:value form —"
+          o.separator "  `date:today` is not a filter, it is a search for that literal text."
+          o.separator Mailmate::SearchSyntax.reference(indent: "  ")
+          o.separator "  (b also takes --all to include un-indexed messages.)"
           o.separator ""
           o.separator "FIELDS (for the fields argument / --fields)"
           o.separator "  id          eml-id (always included as first column)"

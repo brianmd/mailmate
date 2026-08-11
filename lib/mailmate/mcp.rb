@@ -80,21 +80,14 @@ module Mailmate
           Search MailMate's .eml files using MailMate's quicksearch syntax.
           Returns column-aligned CSV. Same engine as the `mmsearch` CLI.
 
-          Query = space-separated specs combined with AND (no or/parens yet).
-          Quote multi-word terms ("invoice due"). Modifiers:
-            (bare term)  From/To/Cc/Subject OR body contains
-            f <t> From    t <t> To/Cc    c <t> Cc    s <t> Subject
-            a <t> any address header    b <t> body    m <t> headers OR body
-            d <date>  received: Y, Y-M, Y-M-D, or relative 1d/2w/3m/1y
-            T <tag>   tag / IMAP keyword (K is a synonym)
-            !<value>  negate, e.g. f !smith  (From does NOT contain smith)
+          There is NO key:value form. `date:today`, `after:8am`, `from:bob`
+          and friends are not filters here — they are searched for as literal
+          text and match nothing, silently. Use the modifiers below.
+
+          #{Mailmate::SearchSyntax.reference(indent: "  ")}
+
           The `mailbox` arg also accepts a smart-mailbox name (e.g. Newsletters,
           Receipts, Priority) whose filter is ANDed into the search.
-
-          Examples:
-            query="f substack d 7d"        from Substack in the last 7 days
-            query="T urgent"               tagged "urgent"
-            query="s 'invoice due' !draft" subject has 'invoice due', not 'draft'
 
           Fields default to: flags date time direction party subject.
           Prefix with "+" to add to the defaults ("+tags +mailbox"); a bare

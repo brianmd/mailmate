@@ -47,7 +47,6 @@ class TestSearchSyntax < Minitest::Test
       "after:8am"             => "after",
       "from:bob@example.com"  => "from",
       "subject:invoice"       => "subject",
-      "is:unread"             => "is",
       "newer_than:2d"         => "newer_than" }.each do |query, key|
       tokens = S.foreign_tokens(query)
       refute_empty tokens, "expected #{query.inspect} to be flagged"
@@ -96,8 +95,8 @@ class TestSearchSyntax < Minitest::Test
   end
 
   def test_hint_handles_a_key_with_no_known_equivalent
-    hint = S.zero_result_hint("is:unread")
-    assert_includes hint, "is:unread"
+    hint = S.zero_result_hint("in:inbox")
+    assert_includes hint, "in:inbox"
     assert_includes hint, "mmsearch --help"
   end
 

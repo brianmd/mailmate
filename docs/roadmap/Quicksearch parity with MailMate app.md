@@ -8,7 +8,7 @@ closed_date:
 
 # Quicksearch parity with MailMate app
 
-## Status: 🟡 in progress (phases 1–2 shipped 2026-08-11; phases 3–4 idea)
+## Status: 🟡 in progress (phases 1, 2, 4 shipped 2026-08-11; phase 3 idea)
 
 ## Progress
 
@@ -17,7 +17,7 @@ closed_date:
 | [[#Phase 1 — Date comparisons (`d <2026-08`, `d >2026-08`)|1]] | absolute date ranges | ✅ Done | 2026-08-11 |
 | [[#Phase 2 — Boolean OR (and binds tighter, no parens)|2]] | `f bob s invoice or f ann s invoice` | ✅ Done | 2026-08-11 |
 | [[#Phase 3 — Arbitrary header specs|3]] | `delivered-to:joe`, `x-mailer.name:mailmate` | 🕓 Pending | — |
-| [[#Phase 4 — Message-state specs (unread, flagged, attachments)|4]] | quicksearch equivalents for `is:` / `has:` | 🕓 Pending | — |
+| [[#Phase 4 — Message-state specs (unread, flagged, attachments)|4]] | `is:unread` / `has:attachment` as native specs | ✅ Done | 2026-08-11 |
 
 ## Context
 
@@ -61,7 +61,10 @@ Verify the app's actual sub-path vocabulary (`.name`, `.address`, others?) again
 
 ## Phase 4 — Message-state specs (unread, flagged, attachments)
 
-Not in the user-reported gap list, but it is the remaining untranslatable-foreign-key family: `is:unread`, `is:flagged`, `has:attachment` have no quicksearch target. The gem already reads flag state (the `flags` output column comes from the `#flags` index), so the data exists; only search-side syntax is missing. The app's quicksearch state vocabulary should be checked first so we adopt its spelling rather than inventing one.
+**Shipped 2026-08-11.** The app's manual (checked per the plan below) settled the vocabulary question decisively: **the app has no state vocabulary in its toolbar search** — its `A` modifier searches attachment *filenames*, and there is no unread/flagged shorthand at all. With nothing to mirror, the familiar Gmail spellings became first-class quicksearch: `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft`, `has:attachment`, plus the synonyms callers actually type (`is:starred`, `is:answered`, `has:attachments`) and Gmail-style `-is:unread` negation alongside `!`. Flag states read the `#flags` index (`\Seen`, `\Flagged`, `\Answered`, `\Draft`; unread = absence of `\Seen`); attachment presence reads the indexed root `content-type` for `multipart/mixed`, with a real `mail.attachments.any?` fallback when the message is already loaded (there is no `#filename` index locally, so the app's `A` filename search stays out of reach). Unknown state values (`is:snoozed`) are usage errors naming the known states — the same validation pre-pass as dates. `is`/`has` left the translator's `FOREIGN_KEYS`; they are no longer foreign.
+
+> [!note] App-manual findings 2026-08-11 (from the bundled help, § Toolbar Search)
+> Read while settling Phase 4; several affect the remaining plan. (1) **Phase 3 is confirmed native app syntax**: `delivered-to:joe x-mailer.name:mailmate` appears verbatim in the manual — the app transforms the search language via an external script. (2) The app supports **operand parens sharing a modifier**: `t (smith or joe)` — narrower than expression-tree grouping, and possibly worth adopting where our modifier inheritance doesn't reach. (3) Unimplemented modifiers: `q` (quoted text), `M` (like `m` including quoted text), `A` (attachment filenames — blocked on index availability), and the app distinguishes `T` (tags) from `K` (*all* IMAP keywords) where we treat them as synonyms. (4) The app **floors relative dates to the beginning of the unit**: `1y` = this calendar year, `1w` = this week. Ours are N units *ending today* — identical for `Nd`, divergent for `w`/`m`/`y`. (5) App slash dates are **day-month-year with right-side parts optional** (`d 7` = day 7 of the current month, `d 7-4` = April 7); we deliberately chose American M/D/Y with `--european`, and `d 7` parses as year 7 — a small honest divergence worth revisiting.
 
 ## Recommendation
 

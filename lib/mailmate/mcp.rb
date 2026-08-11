@@ -80,13 +80,13 @@ module Mailmate
           Search MailMate's .eml files using MailMate's quicksearch syntax.
           Returns column-aligned CSV. Same engine as the `mmsearch` CLI.
 
-          There is NO native key:value form — write quicksearch directly using
-          the modifiers below. Familiar foreign tokens (`from:bob`,
-          `date:today`, `after:2026-08-01`, `older_than:2w`) are auto-translated
-          to quicksearch, and the rewrite is announced in the result — that
-          announcement means your query was translated, not that it failed.
-          Unrecognized keys (`is:unread`, `has:attachment`) are searched as
-          literal text and match nothing, silently.
+          The only native key:value specs are the state forms below
+          (is:unread, has:attachment). Other familiar foreign tokens
+          (`from:bob`, `date:today`, `after:2026-08-01`, `older_than:2w`) are
+          auto-translated to quicksearch, and the rewrite is announced in the
+          result — that announcement means your query was translated, not
+          that it failed. Unrecognized keys (`in:inbox`, `filename:pdf`) are
+          searched as literal text and match nothing, silently.
 
           #{Mailmate::SearchSyntax.reference(indent: "  ")}
 

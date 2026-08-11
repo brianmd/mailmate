@@ -26,6 +26,8 @@ module Mailmate
       ["m <term>", "common headers OR body (same as a bare term)"],
       ["d <date>", "received: Nh (rolling clock hours), Nd|Nw|Nm|Ny (N calendar units ending today; 1d = today), or Y, Y-M, Y-M-D"],
       ["T <tag>",  "tag / IMAP keyword contains (K is a synonym)"],
+      ["is:<state>", "message state: unread, read, flagged, replied, draft"],
+      ["has:attachment", "root MIME is multipart/mixed (the standard attachment layout)"],
     ].freeze
 
     EXAMPLES = [
@@ -37,6 +39,7 @@ module Mailmate
       ["d 24h",                   "received in the last 24 hours (rolling, not calendar)"],
       ["d >=2026-05 d <2026-08",  "received May through July 2026"],
       ["d 1h or 2026-08-09",      "last hour, plus everything from Aug 9"],
+      ["is:unread d 7d",          "unread, received in the last 7 days"],
       ["T urgent",                "tagged 'urgent'"],
     ].freeze
 
@@ -59,11 +62,13 @@ module Mailmate
     # matches nothing. That silence is the whole problem this list exists to
     # break: an agent or a person gets an empty result set that is
     # indistinguishable from "your mail really has nothing", and believes it.
+    # NOTE: is/has are absent — they are first-class quicksearch now
+    # (is:unread, has:attachment parse as native state specs).
     FOREIGN_KEYS = %w[
       after before older newer older_than newer_than on since until
       date sent received time
       from to cc bcc subject body
-      is has in label folder mailbox category filename
+      in label folder mailbox category filename
     ].freeze
 
     # Spec placeholders for the zero-result hint, for foreign keys whose value

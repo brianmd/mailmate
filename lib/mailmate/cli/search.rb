@@ -225,8 +225,9 @@ module Mailmate
                "Slash dates are day-first: d 9/8/2026 = Aug 9 (default: month-first American)") { opts[:european] = true }
           o.separator ""
           o.separator "SEARCH-STRING SYNTAX"
-          o.separator "  Mirrors MailMate's toolbar quicksearch. There is no native key:value"
-          o.separator "  form — but familiar foreign tokens are auto-translated (see below)."
+          o.separator "  Mirrors MailMate's toolbar quicksearch, plus native state specs"
+          o.separator "  (is:unread, has:attachment). Other familiar key:value tokens are"
+          o.separator "  auto-translated (see FOREIGN SYNTAX below)."
           o.separator Mailmate::SearchSyntax.reference(indent: "  ")
           o.separator "  (b also takes --all to include un-indexed messages.)"
           o.separator ""
@@ -396,13 +397,23 @@ module Mailmate
           else
             negate = tok.start_with?("!")
             operand = negate ? tok[1..] : tok
-            # A bare term opening an or-group inherits the modifier in force
-            # (`d 2024 or 2025`). Elsewhere it is MailMate's "Common"
-            # specifier — common headers OR body — matching the UI
-            # quicksearch behavior. Pass --headers-only to skip the body scan
-            # when speed matters.
-            target = (i.zero? && !quoted && in_force) ? in_force : :message_or_body
-            specs << [target, operand.downcase, negate]
+            if !quoted && operand =~ /\A-?(?:is|has):\S+\z/i
+              # First-class message-state specs (is:unread, has:attachment).
+              # The app has no state vocabulary to mirror (its A modifier
+              # searches attachment FILENAMES), so the familiar Gmail
+              # spellings are native syntax here. `-` negates too — the form
+              # Gmail callers actually write.
+              negate ||= operand.start_with?("-")
+              specs << [:state, operand.delete_prefix("-").downcase, negate]
+            else
+              # A bare term opening an or-group inherits the modifier in
+              # force (`d 2024 or 2025`). Elsewhere it is MailMate's
+              # "Common" specifier — common headers OR body — matching the
+              # UI quicksearch behavior. Pass --headers-only to skip the
+              # body scan when speed matters.
+              target = (i.zero? && !quoted && in_force) ? in_force : :message_or_body
+              specs << [target, operand.downcase, negate]
+            end
             i += 1
           end
         end
@@ -415,8 +426,23 @@ module Mailmate
       SPEC_COST = {
         date: 0,
         from: 1, recipients: 1, cc: 1, subject: 1, address_any: 1, any: 1,
-        tag: 1, keyword: 1,
+        tag: 1, keyword: 1, state: 1,
         body: 2, message_or_body: 2,
+      }.freeze
+
+      # Canonical state names for is:/has: specs, including the spellings
+      # Gmail callers actually use. Values map to a #flags IMAP flag except
+      # :unread (absence of \Seen) and :attachment (root MIME layout).
+      STATE_CANON = {
+        "unread" => :unread, "read" => :read,
+        "flagged" => :flagged, "starred" => :flagged,
+        "replied" => :replied, "answered" => :replied,
+        "draft" => :draft,
+        "attachment" => :attachment, "attachments" => :attachment,
+      }.freeze
+
+      STATE_FLAGS = {
+        read: "\\Seen", flagged: "\\Flagged", replied: "\\Answered", draft: "\\Draft",
       }.freeze
 
       # Evaluate cheap, selective specs before expensive ones, within each
@@ -559,6 +585,13 @@ module Mailmate
       def date_spec_error(specs)
         day_terms, hour_terms = [], []
         specs.each do |field, term, negate|
+          # State specs validate here too (same pre-pass, same
+          # silent-nothing failure being prevented): an unknown state value
+          # would otherwise quietly match no message ever.
+          if field == :state && !STATE_CANON.key?(term.split(":", 2).last)
+            return "state term cannot match anything: #{term} " \
+                   "(known: is:unread is:read is:flagged is:replied is:draft has:attachment)"
+          end
           next unless field == :date
           range = hour_range_for(term) || date_range_for(term)
           if range.nil? || range[0] > range[1]
@@ -751,6 +784,35 @@ module Mailmate
         flags.reject { |f| f.start_with?("\\", "$") }.join(" ").downcase
       end
 
+      # term is the full lowercased token ("is:unread", "has:attachment").
+      # Flag states read the #flags index; attachment presence reads the
+      # indexed root content-type — multipart/mixed is the standard
+      # attachment layout (a Mail fallback checks real attachments when the
+      # message is already loaded). Unknown state values never reach here:
+      # date_spec_error rejects them up front.
+      def state_matches?(eml_id, mail, term)
+        state = STATE_CANON[term.split(":", 2).last]
+        return false unless state
+
+        case state
+        when :unread
+          eml_id ? !message_flags(eml_id).include?("\\Seen") : false
+        when :attachment
+          ct = eml_id ? (reader_for("content-type")&.value_for(eml_id.to_i) rescue nil).to_s : ""
+          return ct.downcase.include?("multipart/mixed") unless ct.empty?
+          mail ? mail.attachments.any? : false
+        else
+          message_flags(eml_id).include?(STATE_FLAGS[state])
+        end
+      end
+
+      def message_flags(eml_id)
+        return [] unless eml_id
+        reader_for("#flags")&.flags_for(eml_id.to_i) || []
+      rescue StandardError
+        []
+      end
+
       def text_body(mail)
         (mail.text_part&.decoded || mail.body.decoded).to_s.force_encoding("UTF-8").scrub.downcase
       rescue StandardError
@@ -843,6 +905,8 @@ module Mailmate
                 common || (!headers_only && body_matches?(eml_id, mail, path, term, term_b, index_only: index_only, exclude_quoted: exclude_quoted))
               when :date
                 date_matches?(mail, eml_id, term)
+              when :state
+                state_matches?(eml_id, mail, term)
               when :any
                 %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
               end

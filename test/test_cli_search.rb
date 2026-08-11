@@ -149,6 +149,65 @@ class TestCliSearch < Minitest::Test
     refute S.matches?(mail, nil, miss, true)
   end
 
+  # ---- state specs (is:/has:) ----
+
+  def test_parse_search_state_specs_are_native
+    assert_equal [[[:state, "is:unread", false]]], S.parse_search("is:unread")
+    assert_equal [[[:state, "is:unread", true]]],  S.parse_search("!is:unread")
+    assert_equal [[[:state, "is:unread", true]]],  S.parse_search("-is:unread")
+    assert_equal [[[:state, "has:attachment", false]]], S.parse_search("has:attachment")
+    # Quoted stays a literal Common-specifier term.
+    assert_equal [[[:message_or_body, "is:unread", false]]], S.parse_search('"is:unread"')
+  end
+
+  FLAG_MAP = {
+    1 => [],                        # unread, unflagged
+    2 => ["\\Seen"],                # read
+    3 => ["\\Seen", "\\Flagged"],   # read + flagged
+    4 => ["\\Seen", "\\Answered"],  # replied
+  }.freeze
+  CT_MAP = {
+    1 => "multipart/mixed; boundary=x",
+    2 => "multipart/alternative; boundary=y",
+  }.freeze
+
+  FakeFlagsReader = Struct.new(:x) do
+    def flags_for(id) = FLAG_MAP.fetch(id, [])
+  end
+  FakeCtReader = Struct.new(:x) do
+    def value_for(id) = CT_MAP[id]
+  end
+
+  def with_state_readers(&blk)
+    readers = { "#flags" => FakeFlagsReader.new, "content-type" => FakeCtReader.new }
+    S.stub(:reader_for, ->(name) { readers[name] }, &blk)
+  end
+
+  def test_state_specs_match_flags_and_attachment_layout
+    with_state_readers do
+      unread = S.parse_search("is:unread")
+      assert S.matches?(nil, "1", unread, true)
+      refute S.matches?(nil, "2", unread, true)
+      assert S.matches?(nil, "2", S.parse_search("is:read"), true)
+      assert S.matches?(nil, "3", S.parse_search("is:flagged"), true)
+      assert S.matches?(nil, "3", S.parse_search("is:starred"), true) # gmail synonym
+      refute S.matches?(nil, "2", S.parse_search("is:flagged"), true)
+      assert S.matches?(nil, "4", S.parse_search("is:replied"), true)
+      assert S.matches?(nil, "1", S.parse_search("has:attachment"), true)
+      refute S.matches?(nil, "2", S.parse_search("has:attachment"), true)
+      # Negation, both spellings.
+      refute S.matches?(nil, "1", S.parse_search("!is:unread"), true)
+      assert S.matches?(nil, "2", S.parse_search("-is:unread"), true)
+    end
+  end
+
+  def test_date_spec_error_flags_unknown_state_values
+    err = S.date_spec_error(S.parse_search("is:snoozed").first)
+    assert_includes err, "is:snoozed"
+    assert_includes err, "is:unread"
+    assert_nil S.date_spec_error(S.parse_search("is:unread has:attachment d 7d").first)
+  end
+
   # ---- date_matches? ----
 
   def make_mail(date:)

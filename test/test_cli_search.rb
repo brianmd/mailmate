@@ -128,6 +128,56 @@ class TestCliSearch < Minitest::Test
     refute S.date_matches?(mail, nil, "not-a-date")
   end
 
+  def test_date_matches_comparisons_on_month
+    june = make_mail(date: Time.utc(2025, 6, 15))
+    assert S.date_matches?(june, nil, ">2025-05")
+    refute S.date_matches?(june, nil, ">2025-06")   # > excludes the period
+    assert S.date_matches?(june, nil, ">=2025-06")
+    assert S.date_matches?(june, nil, "<2025-07")
+    refute S.date_matches?(june, nil, "<2025-06")   # < excludes the period
+    assert S.date_matches?(june, nil, "<=2025-06")
+    refute S.date_matches?(june, nil, "<=2025-05")
+  end
+
+  def test_date_matches_comparisons_on_day_and_year
+    mail = make_mail(date: Time.utc(2025, 6, 15))
+    assert S.date_matches?(mail, nil, ">2025-06-14")
+    refute S.date_matches?(mail, nil, ">2025-06-15")
+    assert S.date_matches?(mail, nil, "<2026")
+    refute S.date_matches?(mail, nil, "<2025")
+  end
+
+  def test_date_matches_comparison_on_relative_window
+    old = make_mail(date: Time.now - 5 * 86_400)
+    # `<3d` = before the 3-day window opens — same set as `d !3d`.
+    assert S.date_matches?(old, nil, "<3d")
+    refute S.date_matches?(make_mail(date: Time.now), nil, "<3d")
+  end
+
+  # ---- date_spec_error ----
+
+  def test_date_spec_error_flags_empty_intersection
+    specs = S.parse_search("d >2026 d <2025")
+    err = S.date_spec_error(specs)
+    assert_includes err, "impossible date range"
+    assert_includes err, "d >2026"
+    assert_includes err, "d <2025"
+  end
+
+  def test_date_spec_error_flags_a_term_that_cannot_match
+    # Nothing is after a window that already extends to the future.
+    err = S.date_spec_error(S.parse_search("d >3d"))
+    assert_includes err, "cannot match"
+  end
+
+  def test_date_spec_error_accepts_valid_combinations
+    assert_nil S.date_spec_error(S.parse_search("d >=2026-05 d <2026-08"))
+    assert_nil S.date_spec_error(S.parse_search("d 2026 d 2026-05"))
+    assert_nil S.date_spec_error(S.parse_search("f bob s invoice"))
+    # Negated windows subtract, not intersect — never "impossible".
+    assert_nil S.date_spec_error(S.parse_search("d 2y d !3d"))
+  end
+
   # ---- exclude_quoted threading ----
 
   def test_body_value_threads_exclude_quoted_through_to_body_index_records

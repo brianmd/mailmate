@@ -111,6 +111,10 @@ module Mailmate
         end
 
         specs = order_specs(parse_search(search_string))
+        if (date_err = date_spec_error(specs))
+          warn date_err
+          return 2
+        end
 
         # Compose + parse the smart-mailbox filter exactly once. The same AST
         # feeds the evaluator, the tier classifier, and the literals extractor.
@@ -398,7 +402,34 @@ module Mailmate
         @date_ranges[term] = compile_date_range(term, today)
       end
 
+      # A term is an optional comparison prefix (>, >=, <, <=) on a period.
+      # The prefix reshapes the period's inclusive [lo, hi] window: `>2026-08`
+      # is "after August" = [20260901, max], `<2026-08` is "before August" =
+      # [min, 20260731]. Bounds are compared as YYYYMMDD integers, so ±1 on a
+      # synthetic bound (a month's "day 31", a year's "Dec 31"+1) is safe —
+      # no real date falls in the gap. A comparison can produce an empty
+      # window (`>3d` — nothing is after a window that already reaches the
+      # future); date_spec_error reports those up front rather than letting
+      # them silently match nothing.
       def compile_date_range(term, today)
+        op = nil
+        if term =~ /\A(>=|<=|>|<)(.+)\z/
+          op, term = Regexp.last_match(1), Regexp.last_match(2)
+        end
+        base = compile_period_range(term, today)
+        return nil unless base
+        return base unless op
+
+        lo, hi = base
+        case op
+        when ">"  then [hi + 1, 9999_12_31]
+        when ">=" then [lo, 9999_12_31]
+        when "<"  then [0, lo - 1]
+        when "<=" then [0, hi]
+        end
+      end
+
+      def compile_period_range(term, today)
         if term =~ /\A(\d+)([dwmy])\z/
           n, u = Regexp.last_match(1).to_i, Regexp.last_match(2)
           cutoff = case u
@@ -418,6 +449,33 @@ module Mailmate
         when 2 then [y * 10_000 + parts[1].to_i * 100 + 1, y * 10_000 + parts[1].to_i * 100 + 31]
         when 3 then [ymd = y * 10_000 + parts[1].to_i * 100 + parts[2].to_i, ymd]
         end
+      end
+
+      # Usage-error string for the date specs in `specs`, nil when they're
+      # fine. Two failure classes, both of which would otherwise surface as a
+      # clean, successful, empty result — the silent-nothing this gem keeps
+      # having to fight: a single term that cannot match anything (`d >3d`,
+      # `d garbage`), and positive terms whose windows don't intersect
+      # (`d >2026 d <2025` — specs AND together, so the combination is
+      # unsatisfiable). Negated terms subtract rather than intersect, so
+      # they're validated individually but excluded from the intersection.
+      def date_spec_error(specs)
+        positive = []
+        specs.each do |field, term, negate|
+          next unless field == :date
+          range = date_range_for(term)
+          if range.nil? || range[0] > range[1]
+            return "date term cannot match anything: d #{term}"
+          end
+          positive << [term, range] unless negate
+        end
+        return nil if positive.size < 2
+
+        lo = positive.map { |_, r| r[0] }.max
+        hi = positive.map { |_, r| r[1] }.min
+        return nil if lo <= hi
+
+        "impossible date range (empty intersection): #{positive.map { |t, _| "d #{t}" }.join(" ")}"
       end
 
       def ymd_int(d)

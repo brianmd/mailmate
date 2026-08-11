@@ -34,6 +34,7 @@ module Mailmate
       ["d 2026-05",               "received in May 2026"],
       ["d 2026-08-10",            "received on one specific day"],
       ["d 1d",                    "received in the last day (the default)"],
+      ["d >=2026-05 d <2026-08",  "received May through July 2026"],
       ["T urgent",                "tagged 'urgent'"],
     ].freeze
 
@@ -42,6 +43,8 @@ module Mailmate
       "Wrap multi-word terms in \"double quotes\".",
       "Prefix an operand with ! to negate: f !smith = from does NOT contain smith.",
       "Negation works on dates too: d !3d = received MORE than 3 days ago.",
+      "Absolute dates compare: d >2026-08 (after Aug), d <2026-08 (before), also >= <=.",
+      "An impossible date combination (d >2026 d <2025) is an error, not 0 results.",
     ].freeze
 
     # Search keys from OTHER mail systems (Gmail, Outlook, Apple Mail, IMAP
@@ -65,8 +68,8 @@ module Mailmate
       "from" => "f <term>", "to" => "t <term>", "cc" => "c <term>",
       "subject" => "s <term>", "body" => "b <term>", "label" => "T <tag>",
       "date" => "d <date>", "sent" => "d <date>", "received" => "d <date>",
-      "on" => "d <date>", "after" => "d <date>", "since" => "d <date>",
-      "before" => "d !<Nd>", "until" => "d !<Nd>",
+      "on" => "d <date>", "after" => "d >=YYYY-MM-DD", "since" => "d >=YYYY-MM-DD",
+      "before" => "d <YYYY-MM-DD", "until" => "d <=YYYY-MM-DD",
       "newer_than" => "d Nd", "older_than" => "d !Nd",
       "newer" => "d Nd", "older" => "d !Nd",
     }.freeze
@@ -86,8 +89,8 @@ module Mailmate
       ["date:today / date:yesterday",                "d 0d / d <that day>"],
       ["date:2026-03-05 or date:3/5/2026 (M/D/Y)",   "d 2026-03-05"],
       ["newer_than:2d / older_than:2w",              "d 2d / d !2w"],
-      ["after:<day> or since:<day>",                 "d <N>d      (N = days since <day>)"],
-      ["before:<day>",                               "d !<N>d"],
+      ["after:2026-05 or since:2026-05",             "d >=2026-05"],
+      ["before:2026-08 / until:2026-08",             "d <2026-08 / d <=2026-08"],
     ].freeze
 
     module_function
@@ -213,8 +216,10 @@ module Mailmate
         translate_point_date(value, today)
       when "after", "since"
         translate_after(value, today)
-      when "before", "until"
-        translate_before(value, today)
+      when "before"
+        translate_before(value, today, "<")
+      when "until"
+        translate_before(value, today, "<=")
       when "newer_than", "newer"
         (rel = parse_relative(value)) && "d #{rel}"
       when "older_than", "older"
@@ -229,8 +234,8 @@ module Mailmate
       end
     end
 
-    # A day-, month-, or year-precision point in time. `d <day>` matches
-    # exactly that day in the engine, so these are exact.
+    # A day-, month-, or year-precision point in time. `d <period>` matches
+    # exactly that period in the engine, so these are exact.
     def translate_point_date(value, today)
       v = value.downcase
       return "d 0d" if v == "today"
@@ -240,36 +245,37 @@ module Mailmate
       return translate_after(v.delete_suffix("-today"), today) if v.end_with?("-today")
       return "d #{v}" if v =~ /\A\d+[dwmy]\z/
 
-      if (day = parse_day(v))
-        "d #{day.strftime("%Y-%m-%d")}"
-      elsif v =~ %r{\A(\d{4})[-/.](\d{1,2})\z}
-        format("d %04d-%02d", Regexp.last_match(1).to_i, Regexp.last_match(2).to_i)
-      elsif v =~ /\A\d{4}\z/
-        "d #{v}"
-      end
+      (period = normalize_period(v)) && "d #{period}"
     end
 
-    # `d Nd` compiles to the inclusive window [today-N, ∞) — exactly
-    # after:/since: semantics (Gmail's after: includes the named day).
+    # Gmail's after: includes the named day; since: likewise → >=.
     def translate_after(value, today)
       v = value.downcase
       return "d 0d" if v == "today"
       return "d 1d" if v == "yesterday"
 
-      day = parse_day(v) or return nil
-      n = (today - day).to_i
-      n >= 0 ? "d #{n}d" : nil
+      (period = normalize_period(v)) && "d >=#{period}"
     end
 
-    # Negating that window leaves [., today-N) — exactly before: semantics
-    # (Gmail's before: excludes the named day).
-    def translate_before(value, today)
+    # Gmail's before: excludes the named day → <. until: includes it → <=.
+    def translate_before(value, today, op)
       v = value.downcase
-      return "d !0d" if v == "today"
+      v = today.strftime("%Y-%m-%d") if v == "today"
+      v = (today - 1).strftime("%Y-%m-%d") if v == "yesterday"
 
-      day = parse_day(v) or return nil
-      n = (today - day).to_i
-      n >= 0 ? "d !#{n}d" : nil
+      (period = normalize_period(v)) && "d #{op}#{period}"
+    end
+
+    # "2026", "2026-05", "2026-03-05", "3/5/2026", "2026/3/5" → the
+    # normalized absolute period string quicksearch expects, or nil.
+    def normalize_period(value)
+      if (day = parse_day(value))
+        day.strftime("%Y-%m-%d")
+      elsif value =~ %r{\A(\d{4})[-/.](\d{1,2})\z}
+        format("%04d-%02d", Regexp.last_match(1).to_i, Regexp.last_match(2).to_i)
+      elsif value =~ /\A\d{4}\z/
+        value
+      end
     end
 
     # Gmail relative units (d/m/y, plus w) carry over as-is: `d N<u>` uses

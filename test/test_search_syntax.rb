@@ -141,21 +141,26 @@ class TestSearchSyntax < Minitest::Test
 
   def test_translates_range_ending_today_as_after_window
     # Seen verbatim in real transcripts.
-    assert_equal "d 1d", translated("date:8/10/2026-today")
+    assert_equal "d >=2026-08-10", translated("date:8/10/2026-today")
   end
 
-  def test_translates_after_before_and_relative_windows
-    assert_equal "d 10d", translated("after:2026-08-01")
-    assert_equal "d 10d", translated("since:8/1/2026")
-    assert_equal "d !10d", translated("before:2026-08-01")
-    assert_equal "d !0d", translated("before:today")
+  def test_translates_after_before_until_as_comparisons
+    assert_equal "d >=2026-08-01", translated("after:2026-08-01")
+    assert_equal "d >=2026-08-01", translated("since:8/1/2026")
+    assert_equal "d >=2026-05", translated("after:2026-05")
+    assert_equal "d >=2027-01-01", translated("after:2027-01-01")
+    assert_equal "d <2026-08-01", translated("before:2026-08-01")
+    assert_equal "d <2026-08-11", translated("before:today")
+    assert_equal "d <2026-08", translated("before:2026-08")
+    assert_equal "d <=2026-08", translated("until:2026-08")
+    assert_equal "d <=2026-08-10", translated("until:yesterday")
     assert_equal "d 2d", translated("newer_than:2d")
     assert_equal "d !2w", translated("older_than:2w")
   end
 
   def test_leaves_untranslatable_values_and_keys_alone
     ["after:8am", "is:unread", "has:attachment", "in:inbox",
-     "date:next-week", "date:31/12/2026", "after:2027-01-01",
+     "date:next-week", "date:31/12/2026",
      "re:launch", "b http://example.com", "d 1d", "f substack d 7d"].each do |q|
       assert_equal q, translated(q), "expected #{q.inspect} unchanged"
     end

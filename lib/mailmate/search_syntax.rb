@@ -24,7 +24,7 @@ module Mailmate
       ["a <term>", "any address header contains"],
       ["b <term>", "body contains"],
       ["m <term>", "common headers OR body (same as a bare term)"],
-      ["d <date>", "received date: Nd|Nw|Nm|Ny (relative), or Y, Y-M, Y-M-D"],
+      ["d <date>", "received: Nh (rolling clock hours), Nd|Nw|Nm|Ny (N calendar units ending today; 1d = today), or Y, Y-M, Y-M-D"],
       ["T <tag>",  "tag / IMAP keyword contains (K is a synonym)"],
     ].freeze
 
@@ -33,7 +33,8 @@ module Mailmate
       ["s \"invoice due\" !draft", "subject has 'invoice due', not 'draft'"],
       ["d 2026-05",               "received in May 2026"],
       ["d 2026-08-10",            "received on one specific day"],
-      ["d 1d",                    "received in the last day (the default)"],
+      ["d 1d",                    "received today (the default); d 2d = yesterday + today"],
+      ["d 24h",                   "received in the last 24 hours (rolling, not calendar)"],
       ["d >=2026-05 d <2026-08",  "received May through July 2026"],
       ["T urgent",                "tagged 'urgent'"],
     ].freeze
@@ -86,7 +87,7 @@ module Mailmate
     TRANSLATIONS_HELP = [
       ["from:bob   (to: cc: subject: body: label:)", "f bob   (t c s b T)"],
       ["-from:bob or !from:bob",                     "f !bob"],
-      ["date:today / date:yesterday",                "d 0d / d <that day>"],
+      ["date:today / date:yesterday",                "d 1d / d <that day>"],
       ["date:2026-03-05 or date:3/5/2026 (M/D/Y)",   "d 2026-03-05"],
       ["newer_than:2d / older_than:2w",              "d 2d / d !2w"],
       ["after:2026-05 or since:2026-05",             "d >=2026-05"],
@@ -238,7 +239,7 @@ module Mailmate
     # exactly that period in the engine, so these are exact.
     def translate_point_date(value, today)
       v = value.downcase
-      return "d 0d" if v == "today"
+      return "d 1d" if v == "today"
       return "d #{(today - 1).strftime("%Y-%m-%d")}" if v == "yesterday"
       # `date:8/10/2026-today` (seen in real transcripts): a range whose end
       # is now IS an after-window.
@@ -251,8 +252,8 @@ module Mailmate
     # Gmail's after: includes the named day; since: likewise → >=.
     def translate_after(value, today)
       v = value.downcase
-      return "d 0d" if v == "today"
-      return "d 1d" if v == "yesterday"
+      return "d 1d" if v == "today"
+      return "d 2d" if v == "yesterday"
 
       (period = normalize_period(v)) && "d >=#{period}"
     end

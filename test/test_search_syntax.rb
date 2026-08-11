@@ -127,7 +127,7 @@ class TestSearchSyntax < Minitest::Test
   end
 
   def test_translates_date_keywords_and_formats
-    assert_equal "d 0d", translated("date:today")
+    assert_equal "d 1d", translated("date:today")
     assert_equal "d 2026-08-10", translated("date:yesterday")
     assert_equal "d 2026-03-05", translated("date:2026-03-05")
     assert_equal "d 2026-03-05", translated("date:3/5/2026")
@@ -135,8 +135,8 @@ class TestSearchSyntax < Minitest::Test
     assert_equal "d 2026-05", translated("date:2026/5")
     assert_equal "d 2026", translated("date:2026")
     assert_equal "d 7d", translated("date:7d")
-    assert_equal "d 0d", translated("received:today")
-    assert_equal "d 0d", translated("on:today")
+    assert_equal "d 1d", translated("received:today")
+    assert_equal "d 1d", translated("on:today")
   end
 
   def test_translates_range_ending_today_as_after_window
@@ -171,19 +171,19 @@ class TestSearchSyntax < Minitest::Test
   end
 
   def test_translates_in_place_preserving_the_rest_of_the_query
-    assert_equal "f bob d 0d is:unread", translated("from:bob date:today is:unread")
+    assert_equal "f bob d 1d is:unread", translated("from:bob date:today is:unread")
   end
 
   def test_translate_returns_one_note_per_rewrite
     _, notes = S.translate("from:bob date:today is:unread", today: TODAY)
-    assert_equal [["from:bob", "f bob"], ["date:today", "d 0d"]], notes
+    assert_equal [["from:bob", "f bob"], ["date:today", "d 1d"]], notes
   end
 
   def test_translation_notice_lists_rewrites_and_is_nil_when_none
     _, notes = S.translate("date:today", today: TODAY)
     notice = S.translation_notice(notes)
     assert_includes notice, "date:today"
-    assert_includes notice, "d 0d"
+    assert_includes notice, "d 1d"
     assert_includes notice, "mmsearch --help"
     assert_nil S.translation_notice([])
   end

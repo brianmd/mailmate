@@ -90,29 +90,54 @@ class TestCliSearch < Minitest::Test
     end
   end
 
+  # Absolute-date fixtures use noon UTC: matching converts to the display
+  # zone (same as the date/time output columns), and noon lands on the same
+  # calendar day in any test-runner zone within ±11 hours of UTC — midnight
+  # would shift a day west of Greenwich.
   def test_date_matches_year_only
-    mail = make_mail(date: Time.utc(2025, 6, 15))
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
     assert S.date_matches?(mail, nil, "2025")
     refute S.date_matches?(mail, nil, "2024")
   end
 
   def test_date_matches_year_month
-    mail = make_mail(date: Time.utc(2025, 6, 15))
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
     assert S.date_matches?(mail, nil, "2025-06")
     refute S.date_matches?(mail, nil, "2025-07")
   end
 
   def test_date_matches_full_date
-    mail = make_mail(date: Time.utc(2025, 6, 15))
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
     assert S.date_matches?(mail, nil, "2025-06-15")
     refute S.date_matches?(mail, nil, "2025-06-16")
   end
 
+  def test_date_matches_day_in_display_zone_not_senders
+    # 2am UTC is the previous evening anywhere west of UTC. Whatever day
+    # localize says a message displays under is the day a search must find
+    # it under — sender-local and display day differ for this instant in
+    # most zones, and the display day wins.
+    t = Time.utc(2025, 6, 15, 2)
+    display_day = Mailmate.localize(t).strftime("%Y-%m-%d")
+    assert S.date_matches?(make_mail(date: t), nil, display_day)
+  end
+
   def test_date_matches_relative_days
-    # Date in the past 5 days should match "10d" but not "1d".
-    mail = make_mail(date: Time.now - 5 * 86_400)
-    assert S.date_matches?(mail, nil, "10d")
-    refute S.date_matches?(mail, nil, "1d")
+    # `1d` = today only; `2d` = yesterday and today; `10d` reaches back 9.
+    assert S.date_matches?(make_mail(date: Time.now), nil, "1d")
+    five_days = make_mail(date: Time.now - 5 * 86_400)
+    assert S.date_matches?(five_days, nil, "10d")
+    refute S.date_matches?(five_days, nil, "5d")
+    assert S.date_matches?(five_days, nil, "6d")
+    refute S.date_matches?(five_days, nil, "1d")
+  end
+
+  def test_date_matches_hour_window_is_rolling
+    assert S.date_matches?(make_mail(date: Time.now - 1800), nil, "1h")
+    two_hours = make_mail(date: Time.now - 2 * 3600)
+    refute S.date_matches?(two_hours, nil, "1h")
+    assert S.date_matches?(two_hours, nil, "24h")
+    assert S.date_matches?(two_hours, nil, "<1h") # older than the 1h window
   end
 
   def test_date_matches_relative_weeks_months_years
@@ -129,7 +154,7 @@ class TestCliSearch < Minitest::Test
   end
 
   def test_date_matches_comparisons_on_month
-    june = make_mail(date: Time.utc(2025, 6, 15))
+    june = make_mail(date: Time.utc(2025, 6, 15, 12))
     assert S.date_matches?(june, nil, ">2025-05")
     refute S.date_matches?(june, nil, ">2025-06")   # > excludes the period
     assert S.date_matches?(june, nil, ">=2025-06")
@@ -140,7 +165,7 @@ class TestCliSearch < Minitest::Test
   end
 
   def test_date_matches_comparisons_on_day_and_year
-    mail = make_mail(date: Time.utc(2025, 6, 15))
+    mail = make_mail(date: Time.utc(2025, 6, 15, 12))
     assert S.date_matches?(mail, nil, ">2025-06-14")
     refute S.date_matches?(mail, nil, ">2025-06-15")
     assert S.date_matches?(mail, nil, "<2026")
@@ -165,17 +190,24 @@ class TestCliSearch < Minitest::Test
   end
 
   def test_date_spec_error_flags_a_term_that_cannot_match
-    # Nothing is after a window that already extends to the future.
-    err = S.date_spec_error(S.parse_search("d >3d"))
-    assert_includes err, "cannot match"
+    # Nothing is after a window that already extends to the future, and a
+    # zero-length window contains nothing.
+    ["d >3d", "d >1h", "d 0d", "d 0h"].each do |q|
+      err = S.date_spec_error(S.parse_search(q))
+      refute_nil err, "expected #{q.inspect} to error"
+      assert_includes err, "cannot match"
+    end
   end
 
   def test_date_spec_error_accepts_valid_combinations
     assert_nil S.date_spec_error(S.parse_search("d >=2026-05 d <2026-08"))
     assert_nil S.date_spec_error(S.parse_search("d 2026 d 2026-05"))
     assert_nil S.date_spec_error(S.parse_search("f bob s invoice"))
+    assert_nil S.date_spec_error(S.parse_search("d 24h"))
     # Negated windows subtract, not intersect — never "impossible".
     assert_nil S.date_spec_error(S.parse_search("d 2y d !3d"))
+    # Day and hour windows are different scales; no cross-family check.
+    assert_nil S.date_spec_error(S.parse_search("d 24h d 2026"))
   end
 
   # ---- exclude_quoted threading ----

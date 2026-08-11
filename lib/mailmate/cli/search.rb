@@ -383,10 +383,12 @@ module Mailmate
       # The `#date` index stores fixed-format strings ("2026-03-19 18:55:19
       # -0600", sender-local time with varying UTC offsets — NOT lexically
       # comparable). date_matches? runs once per candidate message, so the
-      # hot path avoids Time.parse (~10× slower than slicing) and per-call
-      # cutoff arithmetic: terms compile once to an inclusive [lo, hi] range
-      # of YYYYMMDD integers, and the indexed value slices straight to the
-      # same integer form. Calendar-date comparison semantics are unchanged.
+      # hot path avoids Time.parse (~10× slower than fast_time's slicing) and
+      # per-call cutoff arithmetic: day terms compile once to an inclusive
+      # [lo, hi] range of YYYYMMDD integers; per message, fast_time slices
+      # the indexed value into a Time (offset preserved) which localize then
+      # converts to the display zone before the day compare. Hour terms
+      # (`24h`) compare the same Time as an epoch instant instead.
 
       # Compiled day-range for a date term, memoized per term. nil = term
       # can't match anything. The memo resets when the calendar day rolls
@@ -432,11 +434,17 @@ module Mailmate
       def compile_period_range(term, today)
         if term =~ /\A(\d+)([dwmy])\z/
           n, u = Regexp.last_match(1).to_i, Regexp.last_match(2)
+          return nil if n.zero? # a zero-length window matches nothing
+          # N units ENDING today: `1d` = today only, `7d` = the last 7
+          # calendar days including today. (Off-by-one fixed 2026-08-11 to
+          # match the MailMate app, where `d 1d` is today's mail — the old
+          # cutoff of today-N made `d 1d` span two calendar days. For a
+          # rolling 24-hour clock window, that's `d 24h` now.)
           cutoff = case u
-                   when "d" then today - n
-                   when "w" then today - (n * 7)
-                   when "m" then today << n
-                   when "y" then today << (n * 12)
+                   when "d" then today - (n - 1)
+                   when "w" then today - (n * 7 - 1)
+                   when "m" then (today << n) + 1
+                   when "y" then (today << (n * 12)) + 1
                    end
           return [ymd_int(cutoff), 9999_12_31]
         end
@@ -460,61 +468,85 @@ module Mailmate
       # unsatisfiable). Negated terms subtract rather than intersect, so
       # they're validated individually but excluded from the intersection.
       def date_spec_error(specs)
-        positive = []
+        day_terms, hour_terms = [], []
         specs.each do |field, term, negate|
           next unless field == :date
-          range = date_range_for(term)
+          range = hour_range_for(term) || date_range_for(term)
           if range.nil? || range[0] > range[1]
             return "date term cannot match anything: d #{term}"
           end
-          positive << [term, range] unless negate
+          next if negate
+          (term.end_with?("h") ? hour_terms : day_terms) << [term, range]
         end
-        return nil if positive.size < 2
 
-        lo = positive.map { |_, r| r[0] }.max
-        hi = positive.map { |_, r| r[1] }.min
-        return nil if lo <= hi
-
-        "impossible date range (empty intersection): #{positive.map { |t, _| "d #{t}" }.join(" ")}"
+        # Day windows intersect with day windows and hour windows with hour
+        # windows; the two families use different scales (YYYYMMDD ints vs
+        # epoch seconds), and a cross-family contradiction is not worth the
+        # unit conversion to detect.
+        [day_terms, hour_terms].each do |family|
+          next if family.size < 2
+          lo = family.map { |_, r| r[0] }.max
+          hi = family.map { |_, r| r[1] }.min
+          next if lo <= hi
+          return "impossible date range (empty intersection): #{family.map { |t, _| "d #{t}" }.join(" ")}"
+        end
+        nil
       end
 
       def ymd_int(d)
         d.year * 10_000 + d.month * 100 + d.day
       end
 
-      # "2026-03-19 …" → 20260319 without Time.parse. nil when the value
-      # isn't in the indexed shape (caller falls back to the slow path).
-      def fast_ymd(s)
-        return nil unless s && s.length >= 10 && s.getbyte(4) == 0x2D && s.getbyte(7) == 0x2D
-        y = s[0, 4].to_i
-        m = s[5, 2].to_i
-        d = s[8, 2].to_i
-        return nil if y.zero? || m.zero? || d.zero?
-        y * 10_000 + m * 100 + d
+      # Rolling clock windows: `24h` = the last 24 hours as an instant range,
+      # unlike d/w/m/y which are calendar windows. Returns [lo, hi] epoch
+      # floats (lo > hi means the term cannot match — date_spec_error reports
+      # it), or nil when the term isn't an hour form. Deliberately NOT
+      # memoized: the cutoff moves with the clock, and the MCP server process
+      # lives long enough for a cached one to go stale.
+      def hour_range_for(term)
+        m = /\A(>=|<=|>|<)?(\d+)h\z/.match(term)
+        return nil unless m
+        op, n = m[1], m[2].to_i
+        return [1.0, 0.0] if n.zero?
+
+        cutoff = Time.now.to_f - (n * 3600)
+        case op
+        when nil, ">=" then [cutoff, Float::INFINITY]
+        when ">"       then [1.0, 0.0] # the window already reaches the future
+        when "<"       then [-Float::INFINITY, cutoff]
+        when "<="      then [-Float::INFINITY, Float::INFINITY]
+        end
       end
 
+      # Match on the message's absolute send instant, converted to the display
+      # zone via Mailmate.localize — the SAME conversion the date/time output
+      # columns use, so the day a term matches is always the day the caller
+      # sees in the output. (The raw `#date` index value is sender-local time;
+      # matching on its sliced day — the old fast path — made `d 1d` return
+      # mail displayed under yesterday's date whenever the sender's calendar
+      # ran ahead of the display zone, e.g. a UTC sender after 6pm MDT.)
       def date_matches?(mail, eml_id, term)
+        t = nil
+        if eml_id
+          s = (reader_for("#date")&.value_for(eml_id.to_i) rescue nil)
+          t = fast_time(s) || (Time.parse(s) rescue nil) if s && !s.empty?
+        end
+        if t.nil? && mail
+          raw = mail.date
+          t = raw.respond_to?(:to_time) ? raw.to_time : raw
+        end
+        return false unless t
+
+        if (hours = hour_range_for(term))
+          f = t.to_f
+          return f >= hours[0] && f <= hours[1]
+        end
+
         range = date_range_for(term)
         return false unless range
 
-        ymd = nil
-        if eml_id
-          s = (reader_for("#date")&.value_for(eml_id.to_i) rescue nil)
-          if s && !s.empty?
-            ymd = fast_ymd(s)
-            if ymd.nil?
-              t = (Time.parse(s) rescue nil)
-              ymd = t && ymd_int(t.to_date)
-            end
-          end
-        end
-        if ymd.nil? && mail
-          raw = mail.date
-          d = raw.respond_to?(:to_time) ? raw.to_time : raw
-          ymd = d && ymd_int(d.to_date)
-        end
-        return false unless ymd
-
+        local = Mailmate.localize(t)
+        ymd = local.year * 10_000 + local.month * 100 + local.day
         ymd >= range[0] && ymd <= range[1]
       rescue StandardError
         false

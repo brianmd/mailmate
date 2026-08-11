@@ -100,4 +100,99 @@ class TestSearchSyntax < Minitest::Test
     assert_includes hint, "is:unread"
     assert_includes hint, "mmsearch --help"
   end
+
+  # ---- translation ---------------------------------------------------------
+
+  TODAY = Date.new(2026, 8, 11)
+
+  def translated(query)
+    S.translate(query, today: TODAY).first
+  end
+
+  def test_translates_header_keys
+    assert_equal "f bob@example.com", translated("from:bob@example.com")
+    assert_equal "t ann", translated("to:ann")
+    assert_equal "c ann", translated("cc:ann")
+    assert_equal "s invoice", translated("subject:invoice")
+    assert_equal "b unsubscribe", translated("body:unsubscribe")
+    assert_equal "T urgent", translated("label:urgent")
+  end
+
+  def test_translates_quoted_and_negated_header_values
+    assert_equal "s \"invoice due\"", translated('subject:"invoice due"')
+    assert_equal "f !smith", translated("-from:smith")
+    assert_equal "f !smith", translated("!from:smith")
+    # `f !"a b"` would not tokenize — a negated multi-word value stays put.
+    assert_equal '-subject:"a b"', translated('-subject:"a b"')
+  end
+
+  def test_translates_date_keywords_and_formats
+    assert_equal "d 0d", translated("date:today")
+    assert_equal "d 2026-08-10", translated("date:yesterday")
+    assert_equal "d 2026-03-05", translated("date:2026-03-05")
+    assert_equal "d 2026-03-05", translated("date:3/5/2026")
+    assert_equal "d 2026-03-05", translated("date:2026/3/5")
+    assert_equal "d 2026-05", translated("date:2026/5")
+    assert_equal "d 2026", translated("date:2026")
+    assert_equal "d 7d", translated("date:7d")
+    assert_equal "d 0d", translated("received:today")
+    assert_equal "d 0d", translated("on:today")
+  end
+
+  def test_translates_range_ending_today_as_after_window
+    # Seen verbatim in real transcripts.
+    assert_equal "d 1d", translated("date:8/10/2026-today")
+  end
+
+  def test_translates_after_before_and_relative_windows
+    assert_equal "d 10d", translated("after:2026-08-01")
+    assert_equal "d 10d", translated("since:8/1/2026")
+    assert_equal "d !10d", translated("before:2026-08-01")
+    assert_equal "d !0d", translated("before:today")
+    assert_equal "d 2d", translated("newer_than:2d")
+    assert_equal "d !2w", translated("older_than:2w")
+  end
+
+  def test_leaves_untranslatable_values_and_keys_alone
+    ["after:8am", "is:unread", "has:attachment", "in:inbox",
+     "date:next-week", "date:31/12/2026", "after:2027-01-01",
+     "re:launch", "b http://example.com", "d 1d", "f substack d 7d"].each do |q|
+      assert_equal q, translated(q), "expected #{q.inspect} unchanged"
+    end
+  end
+
+  def test_leaves_quoted_literals_alone
+    assert_equal 's "date:today"', translated('s "date:today"')
+  end
+
+  def test_translates_in_place_preserving_the_rest_of_the_query
+    assert_equal "f bob d 0d is:unread", translated("from:bob date:today is:unread")
+  end
+
+  def test_translate_returns_one_note_per_rewrite
+    _, notes = S.translate("from:bob date:today is:unread", today: TODAY)
+    assert_equal [["from:bob", "f bob"], ["date:today", "d 0d"]], notes
+  end
+
+  def test_translation_notice_lists_rewrites_and_is_nil_when_none
+    _, notes = S.translate("date:today", today: TODAY)
+    notice = S.translation_notice(notes)
+    assert_includes notice, "date:today"
+    assert_includes notice, "d 0d"
+    assert_includes notice, "mmsearch --help"
+    assert_nil S.translation_notice([])
+  end
+
+  def test_help_carries_the_translation_table
+    help = Mailmate::CLI::Search.send(:build_parser, {}).to_s
+    assert_includes help, "FOREIGN SYNTAX"
+    assert_includes help, "date:today"
+  end
+
+  def test_mcp_description_discloses_translation_without_teaching_foreign_syntax
+    mcp = Mailmate::MCP::TOOLS.find { |t| t[:name] == "search" }[:description]
+    assert_includes mcp, "auto-translated"
+    # The MCP teaches quicksearch, not the foreign table.
+    refute_includes mcp, "FOREIGN SYNTAX"
+  end
 end

@@ -72,6 +72,14 @@ module Mailmate
         parser.parse!(argv)
 
         search_string = argv[0] || DEFAULT_SEARCH
+        # Rewrite Gmail/Outlook-style key:value tokens to their exact
+        # quicksearch equivalent — loudly, never silently: every rewrite is
+        # announced on stderr so the transcript shows what actually ran (and
+        # the caller learns the syntax). stdout stays clean CSV.
+        search_string, translations = Mailmate::SearchSyntax.translate(search_string)
+        if (notice = Mailmate::SearchSyntax.translation_notice(translations))
+          warn notice
+        end
         fields_arg    = (opts[:fields] || argv[1] || DEFAULT_FIELDS).to_s.strip
         # `+...` means "defaults plus these"; bare list = exactly those columns.
         # Defaults already include `id` as the first column, so `+x` keeps id
@@ -200,10 +208,13 @@ module Mailmate
                "Sort rows by date+time: asc (default), desc, none") { |v| opts[:sort] = v.to_sym }
           o.separator ""
           o.separator "SEARCH-STRING SYNTAX"
-          o.separator "  Mirrors MailMate's toolbar quicksearch. There is no key:value form —"
-          o.separator "  `date:today` is not a filter, it is a search for that literal text."
+          o.separator "  Mirrors MailMate's toolbar quicksearch. There is no native key:value"
+          o.separator "  form — but familiar foreign tokens are auto-translated (see below)."
           o.separator Mailmate::SearchSyntax.reference(indent: "  ")
           o.separator "  (b also takes --all to include un-indexed messages.)"
+          o.separator ""
+          o.separator "FOREIGN SYNTAX (Gmail/Outlook-style, auto-translated, announced on stderr)"
+          o.separator Mailmate::SearchSyntax.translation_reference(indent: "  ")
           o.separator ""
           o.separator "FIELDS (for the fields argument / --fields)"
           o.separator "  id          eml-id (always included as first column)"

@@ -57,7 +57,7 @@ class TestSearchSyntax < Minitest::Test
 
   def test_leaves_valid_quicksearch_alone
     ["d 1d", "f substack d 7d", "s \"invoice due\" !draft", "d 2026-08-10",
-     "T urgent", "m brycer d 60d", "f !smith", ""].each do |query|
+     "T urgent", "m acme d 60d", "f !smith", ""].each do |query|
       assert_empty S.foreign_tokens(query), "false positive on #{query.inspect}"
     end
   end
@@ -91,7 +91,7 @@ class TestSearchSyntax < Minitest::Test
     # Polling for mail that has not arrived is normal and correct — an empty
     # result there must stay quiet, or the advisory becomes noise.
     assert_nil S.zero_result_hint("d 1h")
-    assert_nil S.zero_result_hint("f PNMNotification d 1d")
+    assert_nil S.zero_result_hint("f OrderShipped d 1d")
     assert_nil S.zero_result_hint("")
   end
 

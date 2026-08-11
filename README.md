@@ -173,7 +173,7 @@ mmsearch 'd 2026-05'
 mmsearch 'f acme' 'id flags subject from' --limit 20 --no-align
 ```
 
-**Quicksearch syntax.** The search-string is a list of specs combined with **AND** (`or`/parens not yet supported). Wrap multi-word terms in `"double quotes"`.
+**Quicksearch syntax.** The search-string is a list of specs combined with **AND**; a bare `or` separates alternatives, and AND binds tighter (no parens — write `(f bob or f ann) s invoice` out as `f bob s invoice or f ann s invoice`). After `or`, a bare first term inherits the modifier in force: `d 2024 or 2025 or 2y`. Wrap multi-word terms in `"double quotes"` (also how to search for the literal word "or"). `mmsearch --help` is the canonical, always-current rendering of this table.
 
 | Modifier | Scope |
 |---|---|
@@ -185,9 +185,11 @@ mmsearch 'f acme' 'id flags subject from' --limit 20 --no-align
 | `a <term>` | Any address header contains. |
 | `b <term>` | Body (plain text) contains. |
 | `m <term>` | Common headers OR body. |
-| `d <date>` | Received date: `Y`, `Y-M`, `Y-M-D`, or relative `1d`/`2w`/`3m`/`1y`. |
+| `d <date>` | Received: `Nh` (rolling clock hours, `24h` = last 24 hours), `Nd`/`Nw`/`Nm`/`Ny` (N calendar units ending today — `1d` = today, `2d` = yesterday + today), or absolute `Y`, `Y-M`, `Y-M-D`. Slash dates are month-first American (`8/9/2026` = Aug 9); `--european` flips to day-first. Comparisons on absolute dates: `d >2026-08` (after), `d <2026-08` (before), also `>=`/`<=`. |
 | `T <tag>` | Tags / IMAP keywords (`K` is a synonym). |
-| `!<value>` | Negate, e.g. `f !smith` = From does NOT contain smith. |
+| `!<value>` | Negate, e.g. `f !smith` = From does NOT contain smith; works on dates too (`d !3d` = more than 3 days ago). |
+
+Dates match on the **display-zone day** — the same day the `date`/`time` output columns show. An impossible date term or combination (`d 2026-02-31`, `d >2026 d <2025`) is a usage error, not a silent empty result. Familiar foreign `key:value` tokens (`from:bob`, `date:today`, `after:2026-08-01`, `older_than:2w`) are auto-translated to quicksearch with each rewrite announced on stderr; unrecognized keys (`is:unread`) are searched as literal text, and an empty result says so.
 
 The `--mailbox` argument accepts an account, an `account/path`, a bare mailbox name matched across accounts, or a **smart-mailbox name** (e.g. `Newsletters`, `Receipts`, `Priority`) whose filter is ANDed into the search.
 
@@ -423,6 +425,8 @@ A few rough edges to be aware of:
 4. **Single-account `mm-send` defaults.** `mm-send` passes flags straight through to `emate mailto`. If you have multiple identities configured in MailMate and don't pass `-f`, MailMate picks the default identity — there's no opinionated multi-account routing in the wrapper.
 
 ## Status
+
+1.7.0 — Search-language release, driven by a study of how LLM agents actually misuse `mmsearch`. The quicksearch syntax reference is now single-sourced (`Mailmate::SearchSyntax`) into both `mmsearch --help` and the MCP `search` description, so the two can no longer drift. Foreign `key:value` dialects (Gmail/Outlook/Spotlight — `from:bob`, `date:today`, `after:2026-08-01`, `older_than:2w`) auto-translate to their exact quicksearch equivalent, loudly: each rewrite is announced on stderr, and untranslatable keys are flagged when a search returns nothing. The language itself grew: boolean `or` (AND binds tighter, no parens; a bare term after `or` inherits the modifier in force), date comparisons (`d >2026-08`, `d <2026-08`, `>=`/`<=`), rolling hour windows (`d 24h`), and American slash dates (`d 8/9/2026`; `--european` for day-first). Two semantic fixes: `d 1d` now means *today* (N calendar units ending today, matching the MailMate app; the old today−N made it span two days), and date matching converts to the display zone — the same conversion the `date`/`time` columns use — so the day a search matches is always the day shown (sender-local index days previously leaked "tomorrow's" mail into `d 1d`). Impossible date terms and combinations (`d 0d`, `d 2026-02-31`, `d >2026 d <2025`) are usage errors instead of silent empty results.
 
 1.6.0 — Distribution release. The repo is now a Claude Code plugin marketplace (`/plugin marketplace add brianmd/mailmate`), and a one-line `install.sh` provisions the MCP server into an isolated `~/.mailmate-mcp` — including a private relocatable Ruby when no Ruby ≥ 3.0 is present — without touching system Ruby, Homebrew, or shell profiles. Every MCP tool now carries a `title` plus `readOnlyHint`/`destructiveHint` annotations (Claude clients use these for permission behavior; Anthropic's directory review requires them), and the README gains a formal Privacy Policy section. No changes to CLI or library behavior.
 

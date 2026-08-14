@@ -5,4 +5,8 @@ $LOAD_PATH.unshift File.expand_path("../lib", __dir__)
 require "mailmate"
 require "mailmate/cli/tags"
 
+require "mailmate/cli/version_flag"
+
+Mailmate::CLI::VersionFlag.handle!(ARGV, "mmtags")
+
 exit Mailmate::CLI::Tags.run(ARGV)

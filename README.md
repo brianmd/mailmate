@@ -362,22 +362,28 @@ EOF
 mm-send -t friend@example.com -s "Photos" /path/to/photo1.jpg /path/to/photo2.jpg <<<"See attached."
 ```
 
-#### Replies and threading
+#### Replies, forwards, and threading
 
-MailMate auto-generates the outgoing `Message-ID` for every send — never the caller's job. `In-Reply-To` and `References` are pure pass-through: whatever you set via `--header` ships verbatim, and **what you don't set is absent**. A reply with a `Re: …` subject but no threading headers shows up as a brand-new conversation in modern mail clients (they thread on headers, not subjects).
+**A `Re:` subject does not thread.** Modern clients thread on headers, so a reply without `In-Reply-To` / `References` shows up in the recipient's client as a brand-new conversation — and nothing in your own view reveals it. MailMate generates the outgoing `Message-ID` itself; that part is never your job.
 
-To make a reply land in-thread, pass both headers:
+Point `mm-send` at the parent and it derives the rest:
 
 ```bash
-mm-send -f you@x -t them@y -s "Re: foo" \
-  --header "In-Reply-To: <parent-message-id@domain>" \
-  --header "References: <root-mid> <parent-mid>" \
-  --send-now <<<"body"
+# Reply — derives In-Reply-To, References, recipient and "Re:" subject.
+mm-send -f you@x --reply-to "<parent-message-id@domain>" --send-now <<<"body"
+
+# Reply-all: adds the other recipients, minus your own identities.
+mm-send -f you@x --reply-all-to 12345 --send-now <<<"body"
+
+# Forward: "Fwd:" subject and the forwarded block; you supply the recipient.
+mm-send -f you@x --forward 12345 -t someone@example.com <<<"FYI"
 ```
 
-Construct `References` as the source message's `References` header (if any) with the source's `Message-ID` appended. If the source is itself a thread root with no `References`, just use its `Message-ID` alone.
+The parent is an eml-id or an RFC Message-ID. **Fields you pass explicitly win; fields you omit follow normal reply rules**, and overriding a visible field never drops the threading headers. `--no-quote` suppresses the quoted original. `--print-prefill` prints the derived fields as JSON and sends nothing — the hook for other tools that fill their own compose form.
 
-The same passthrough applies to the `mailmate-mcp` `send` tool — see the `from`, `in_reply_to`, and `references` fields.
+Hand-assembly via `--header` still works and is the escape hatch when the parent isn't in MailMate's index. The `mailmate-mcp` `send` / `draft` tools take `in_reply_to` and `references` directly.
+
+> **Canonical reference:** [docs/Composing and threading.md](docs/Composing%20and%20threading.md) — the References chain, the merge rule, header safety, identity selection. Everything above summarizes it; when the two disagree, that file is right.
 
 ### `mm-draft` — compose without sending
 
@@ -387,10 +393,9 @@ The same passthrough applies to the `mailmate-mcp` `send` tool — see the `from
 # Opens a draft in MailMate; never sends.
 echo "Quick **markdown** body." | mm-draft -t friend@example.com -s "Hello"
 
-# Threading headers and attachments work exactly as in mm-send.
-mm-draft -f you@x -t them@y -s "Re: foo" \
-  --header "In-Reply-To: <parent-message-id@domain>" \
-  --header "References: <root-mid> <parent-mid>" <<<"body"
+# Reply/forward derivation, threading headers and attachments all work
+# exactly as in mm-send — the only difference is that this cannot send.
+mm-draft -f you@x --reply-to "<parent-message-id@domain>" <<<"body"
 
 # Passing --send-now is refused (exit 2):
 mm-draft -t friend@example.com -s "nope" --send-now <<<"body"
@@ -428,7 +433,11 @@ A few rough edges to be aware of:
 
 ## Status
 
-1.8.0 — Message-state specs. `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft`, and `has:attachment` are first-class quicksearch (the MailMate app has no state vocabulary in its toolbar search — its `A` modifier searches attachment *filenames* — so the familiar Gmail spellings were adopted, including the `starred`/`answered` synonyms and `-is:unread` negation). Flag states read the `#flags` index; attachment presence reads the indexed root `content-type` (`multipart/mixed`). An unknown state value (`is:snoozed`) is a usage error naming the known states, not a silent empty result.
+1.8.0 — Reply derivation, and message-state specs.
+
+**Composing:** replies and forwards are now derived from the parent instead of hand-assembled. `mm-send` / `mm-draft` gain `--reply-to <id>`, `--reply-all-to <id>`, `--forward <id>` (eml-id or Message-ID), which compute `In-Reply-To`, the full `References` chain, recipients and the `Re:`/`Fwd:` subject, plus `--no-quote` and `--print-prefill` (derived fields as JSON, sends nothing). The MCP `send`/`draft` tools take the same `reply_to` / `reply_all_to` / `forward` arguments. Explicitly-passed fields win over derived ones, and overriding a visible field never drops the threading headers. A forward deliberately does *not* thread into the original conversation. The chain is built in exactly one place (`Mailmate::ReplyPrefill`), and `--header` values now route through one sanitizer (`Mailmate::HeaderValue`) — previously the MCP's own argv builder lacked the CR/LF defense that stops a parent `Message-ID` smuggling extra headers. All of it is documented once in [docs/Composing and threading.md](docs/Composing%20and%20threading.md), which the README, `--help` preambles and MCP instructions now point at rather than restate. Every `exe/` command answers `--version`, so consumers can check the installed version instead of probing for a flag (the CLIs pass unknown flags through to `emate`, which makes flag-probing unsafe). The gemspec finally carries `homepage` and `metadata`, so the rubygems page links back to the source.
+
+**Search:** `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft`, and `has:attachment` are first-class quicksearch (the MailMate app has no state vocabulary in its toolbar search — its `A` modifier searches attachment *filenames* — so the familiar Gmail spellings were adopted, including the `starred`/`answered` synonyms and `-is:unread` negation). Flag states read the `#flags` index; attachment presence reads the indexed root `content-type` (`multipart/mixed`). An unknown state value (`is:snoozed`) is a usage error naming the known states, not a silent empty result.
 
 1.7.0 — Search-language release, driven by a study of how LLM agents actually misuse `mmsearch`. The quicksearch syntax reference is now single-sourced (`Mailmate::SearchSyntax`) into both `mmsearch --help` and the MCP `search` description, so the two can no longer drift. Foreign `key:value` dialects (Gmail/Outlook/Spotlight — `from:bob`, `date:today`, `after:2026-08-01`, `older_than:2w`) auto-translate to their exact quicksearch equivalent, loudly: each rewrite is announced on stderr, and untranslatable keys are flagged when a search returns nothing. The language itself grew: boolean `or` (AND binds tighter, no parens; a bare term after `or` inherits the modifier in force), date comparisons (`d >2026-08`, `d <2026-08`, `>=`/`<=`), rolling hour windows (`d 24h`), and American slash dates (`d 8/9/2026`; `--european` for day-first). Two semantic fixes: `d 1d` now means *today* (N calendar units ending today, matching the MailMate app; the old today−N made it span two days), and date matching converts to the display zone — the same conversion the `date`/`time` columns use — so the day a search matches is always the day shown (sender-local index days previously leaked "tomorrow's" mail into `d 1d`). Impossible date terms and combinations (`d 0d`, `d 2026-02-31`, `d >2026 d <2025`) are usage errors instead of silent empty results.
 

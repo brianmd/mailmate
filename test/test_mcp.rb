@@ -160,4 +160,62 @@ class TestMCP < Minitest::Test
       refute draft_response["result"]["isError"], "draft reported an error: #{draft_response}"
     end
   end
+
+  # ---- parent-derived compose (reply_to / reply_all_to / forward) ----
+  #
+  # The MCP does NOT derive anything itself — it hands the parent id to the
+  # CLI, which owns the one implementation. These assert the handoff and the
+  # recipient guard that replaced the schema's `required: to`.
+
+  def compose_argv(args)
+    S.send(:compose_argv, args)
+  end
+
+  def test_reply_to_is_forwarded_to_the_cli
+    argv = compose_argv({ "reply_to" => "<p@example.com>", "body" => "hi" })
+    assert_includes argv.each_cons(2).to_a, ["--reply-to", "<p@example.com>"]
+  end
+
+  def test_reply_all_to_and_forward_map_to_their_own_flags
+    assert_includes compose_argv({ "reply_all_to" => "42" }).each_cons(2).to_a, ["--reply-all-to", "42"]
+    assert_includes compose_argv({ "forward" => "42" }).each_cons(2).to_a, ["--forward", "42"]
+  end
+
+  def test_explicit_fields_still_ship_alongside_a_parent
+    pairs = compose_argv({ "reply_to" => "42", "to" => "other@example.com", "subject" => "Mine" }).each_cons(2).to_a
+    assert_includes pairs, ["-t", "other@example.com"]
+    assert_includes pairs, ["-s", "Mine"]
+    assert_includes pairs, ["--reply-to", "42"]
+  end
+
+  def test_quote_false_suppresses_the_quoted_original
+    assert_includes compose_argv({ "reply_to" => "42", "quote" => false }), "--no-quote"
+    refute_includes compose_argv({ "reply_to" => "42" }), "--no-quote"
+  end
+
+  # Hand-set header values still route through the shared sanitizer, so a
+  # parent Message-ID carrying CR/LF can't smuggle a second header.
+  def test_hand_set_threading_headers_are_sanitized
+    argv = compose_argv({ "in_reply_to" => "a@b\r\nBcc: attacker@example.com" })
+    header = argv[argv.index("--header") + 1]
+    refute_includes header, "\n"
+    refute_includes header, "\r"
+  end
+
+  def test_a_call_with_no_recipient_and_no_parent_is_an_error
+    res = S.send(:call_draft, { "subject" => "x", "body" => "y" })
+    assert res[:isError], "expected isError for a recipient-less draft"
+    assert_includes res[:content].first[:text], "no recipient"
+  end
+
+  def test_reply_to_satisfies_the_recipient_requirement
+    assert_nil S.send(:recipient_check, { "reply_to" => "42", "body" => "y" })
+  end
+
+  # A forward derives subject and body but NOT a recipient — the whole point
+  # is sending it to someone new, so `to` stays required there.
+  def test_forward_without_a_recipient_is_an_error
+    refute_nil S.send(:recipient_check, { "forward" => "42", "body" => "y" })
+    assert_nil S.send(:recipient_check, { "forward" => "42", "to" => "new@example.com" })
+  end
 end

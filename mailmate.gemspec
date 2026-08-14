@@ -22,7 +22,18 @@ Gem::Specification.new do |spec|
     on non-macOS hosts.
   DESC
   spec.license     = "MIT"
+  spec.homepage    = "https://github.com/brianmd/mailmate"
   spec.required_ruby_version = ">= 3.0"
+
+  # Without these, the rubygems.org page carries no link back to the source —
+  # which is how 1.0.0 through 1.7.0 shipped. `source_code_uri` renders the
+  # "Source Code" link. No `homepage_uri`: it would duplicate spec.homepage
+  # above, and `gem build` warns that only the first of the two is shown.
+  spec.metadata = {
+    "source_code_uri" => spec.homepage,
+    "bug_tracker_uri" => "#{spec.homepage}/issues",
+    "documentation_uri" => "#{spec.homepage}#readme"
+  }
 
   spec.files = Dir[
     "lib/**/*.rb",
@@ -30,6 +41,11 @@ Gem::Specification.new do |spec|
     "LICENSE.txt",
     "README.md",
     "config.yml.example",
+    # Shipped because --help and the MCP instructions point at
+    # docs/Composing and threading.md by path; without this the pointer
+    # dangles for anyone who installed the gem rather than cloned the repo.
+    # (roadmap/ is deliberately excluded — internal planning, not user docs.)
+    "docs/*.md",
   ]
   spec.bindir      = "exe"
   spec.executables = Dir["exe/*"].map { |p| File.basename(p) }

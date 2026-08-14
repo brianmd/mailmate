@@ -51,9 +51,18 @@ module Mailmate
       - Prefer `draft` over `send` whenever the user said "don't send" / "just
         draft it" — `draft` physically cannot send, so it's the safe choice.
         `send` also opens a draft and waits unless you pass `send_now: true`.
-      - Threading: set BOTH `in_reply_to` and `references`. A "Re:" subject
-        alone does not thread in modern clients. MailMate generates the
-        outgoing Message-ID itself.
+      - Replying: pass `reply_to` (the parent's eml-id or Message-ID) and the
+        threading headers, recipient and "Re:" subject are derived for you.
+        `reply_all_to` replies to all; `forward` forwards (supply `to`).
+        Fields you also pass explicitly win; ones you omit follow normal
+        reply rules. Prefer this over hand-setting in_reply_to/references —
+        a mis-built References chain sends fine and simply doesn't thread,
+        and nothing in your own view reveals it. A "Re:" subject alone never
+        threads. MailMate generates the outgoing Message-ID itself.
+        Full rules — the References chain, the merge rule, header safety —
+        are in the gem's docs/Composing and threading.md
+        (github.com/brianmd/mailmate), which is canonical; this summary
+        exists only so you need not follow a link mid-call.
 
       Modifying (modify)
       - Drives MailMate's UI via AppleScript: it briefly takes focus, calls are
@@ -237,11 +246,15 @@ module Mailmate
             subject: { type: "string", description: "Subject line." },
             body: { type: "string", description: "Markdown body." },
             attachments: { type: "array", items: { type: "string" }, description: "Absolute paths to files to attach." },
+            reply_to: { type: "string", description: "Parent message to reply to — eml-id or RFC Message-ID. PREFER THIS over setting in_reply_to/references by hand: it derives In-Reply-To, the full References chain, the recipient and a \"Re:\" subject from the parent. Fields you also pass explicitly win; ones you omit follow normal reply rules." },
+            reply_all_to: { type: "string", description: "Same as reply_to but replies to all — adds the other recipients, minus the user own identities." },
+            forward: { type: "string", description: "Parent message to forward — eml-id or RFC Message-ID. Derives a \"Fwd:\" subject and the forwarded block; you supply `to`. A forward deliberately does NOT thread into the original conversation." },
+            quote: { type: "boolean", description: "Include the quoted original when replying/forwarding (default true). Set false to send only your own text." },
             in_reply_to: { type: "string", description: "Message-ID of the parent message (with or without angle brackets). Sets the In-Reply-To header on the outgoing message so recipients' clients thread it correctly." },
             references: { type: "string", description: "Space-separated chain of Message-IDs (with angle brackets). Conventionally: parent's References header + parent's Message-ID. Required alongside in_reply_to for clean threading in deep chains." },
             send_now: { type: "boolean", description: "Send immediately (skip the Drafts pause)." },
           },
-          required: %w[to subject body],
+          required: %w[body],
           additionalProperties: false,
         },
       },
@@ -260,10 +273,14 @@ module Mailmate
             subject: { type: "string", description: "Subject line." },
             body: { type: "string", description: "Markdown body." },
             attachments: { type: "array", items: { type: "string" }, description: "Absolute paths to files to attach." },
+            reply_to: { type: "string", description: "Parent message to reply to — eml-id or RFC Message-ID. PREFER THIS over setting in_reply_to/references by hand: it derives In-Reply-To, the full References chain, the recipient and a \"Re:\" subject from the parent. Fields you also pass explicitly win; ones you omit follow normal reply rules." },
+            reply_all_to: { type: "string", description: "Same as reply_to but replies to all — adds the other recipients, minus the user own identities." },
+            forward: { type: "string", description: "Parent message to forward — eml-id or RFC Message-ID. Derives a \"Fwd:\" subject and the forwarded block; you supply `to`. A forward deliberately does NOT thread into the original conversation." },
+            quote: { type: "boolean", description: "Include the quoted original when replying/forwarding (default true). Set false to send only your own text." },
             in_reply_to: { type: "string", description: "Message-ID of the parent message (with or without angle brackets). Sets the In-Reply-To header so recipients' clients thread it correctly." },
             references: { type: "string", description: "Space-separated chain of Message-IDs (with angle brackets). Conventionally: parent's References header + parent's Message-ID. Required alongside in_reply_to for clean threading in deep chains." },
           },
-          required: %w[to subject body],
+          required: %w[body],
           additionalProperties: false,
         },
       },
@@ -454,7 +471,21 @@ module Mailmate
       with_stdin(payload) { run_cli(Mailmate::CLI::Verify, argv) }
     end
 
+    # `to` and `subject` used to be schema-required, which stopped working the
+    # moment a parent could supply them. JSON Schema can't say "required
+    # unless another field is present", so the check moved here — dropping it
+    # entirely would let a `to`-less call through to open an empty composer.
+    def recipient_check(args)
+      return nil if args["to"] || args["reply_to"] || args["reply_all_to"]
+      return nil if args["forward"] && args["to"]
+
+      text_error("no recipient: pass `to`, or `reply_to`/`reply_all_to` to derive it from the parent. " \
+                 "(`forward` derives the subject and body but not the recipient — pass `to` with it.)")
+    end
+
     def call_send(args)
+      (err = recipient_check(args)) and return err
+
       argv = compose_argv(args)
       argv << "--send-now" if args["send_now"]
       with_stdin(args["body"].to_s) { run_cli(Mailmate::CLI::Send, argv) }
@@ -463,6 +494,8 @@ module Mailmate
     # `draft` mirrors `send` but never sends — it has no send_now option and
     # routes through CLI::Draft, which refuses `--send-now` outright.
     def call_draft(args)
+      (err = recipient_check(args)) and return err
+
       argv = compose_argv(args)
       with_stdin(args["body"].to_s) { run_cli(Mailmate::CLI::Draft, argv) }
     end
@@ -476,19 +509,26 @@ module Mailmate
       argv.push("-c", args["cc"].to_s)      if args["cc"]
       argv.push("-b", args["bcc"].to_s)     if args["bcc"]
       argv.push("-s", args["subject"].to_s) if args["subject"]
-      argv.push("--header", "In-Reply-To: #{bracket_mid(args["in_reply_to"])}") if args["in_reply_to"]
-      argv.push("--header", "References: #{args["references"]}")                if args["references"]
+      # Both values come from ANOTHER message, so both go through the shared
+      # sanitizer — see Mailmate::HeaderValue for why this is not open-coded.
+      argv.push("--header", "In-Reply-To: #{Mailmate::HeaderValue.bracket_message_id(args["in_reply_to"])}") if args["in_reply_to"]
+      argv.push("--header", "References: #{Mailmate::HeaderValue.sanitize(args["references"])}")             if args["references"]
+      # Parent-derived compose: hand the id to the CLI rather than deriving
+      # here. `reply_to` is what a caller should reach for over hand-setting
+      # in_reply_to/references — it builds the References chain from the
+      # parent, the step that is easy to get subtly wrong and impossible to
+      # notice afterwards (a mis-built chain sends fine and simply doesn't
+      # thread).
+      if (parent = args["reply_to"] || args["reply_all_to"] || args["forward"])
+        flag = if args["forward"] then "--forward"
+               elsif args["reply_all_to"] then "--reply-all-to"
+               else "--reply-to"
+               end
+        argv.push(flag, parent.to_s)
+        argv << "--no-quote" if args["quote"] == false
+      end
       Array(args["attachments"]).each { |p| argv << p.to_s }
       argv
-    end
-
-    # Wrap a bare Message-ID in `<…>` if it doesn't already have them. Both
-    # forms are valid input to the MCP for ergonomics; the header value
-    # going on the wire needs the brackets per RFC 5322.
-    def bracket_mid(id)
-      s = id.to_s.strip
-      return s if s.start_with?("<") && s.end_with?(">")
-      "<#{s}>"
     end
 
     def call_open(args)

@@ -12,6 +12,8 @@
 #   Mailmate::PartLookup.body_parts_of(envelope_id) → child body-part-ids of an envelope
 #   Mailmate::EmlLookup.path_for(eml_id)       → eml-id → absolute path
 #   Mailmate::HeaderReader.header(path, name)  → read one header from an .eml
+#   Mailmate::HeaderValue.sanitize(v)          → CR/LF-safe --header value (ALL header paths use this)
+#   Mailmate::ReplyPrefill.build(id, mode:)    → reply/reply-all/forward fields from a parent
 #   Mailmate::MidUrl.for(message_id)           → build a mid:%3C...%3E URL
 #   Mailmate::DuplicateScanner.duplicates      → Hash{Message-ID => Array<eml_id>}
 #   Mailmate::AppleScriptDriver.new(...)       → drive MailMate via AppleScript
@@ -35,6 +37,8 @@ require_relative "mailmate/identity"
 require_relative "mailmate/header_reader"
 require_relative "mailmate/mid_url"
 require_relative "mailmate/eml_lookup"
+require_relative "mailmate/header_value"
+require_relative "mailmate/reply_prefill"
 require_relative "mailmate/duplicate_scanner"
 require_relative "mailmate/applescript_driver"
 require_relative "mailmate/ast"

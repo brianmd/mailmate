@@ -103,4 +103,34 @@ class TestExeShims < Minitest::Test
   def test_mm_send_exists
     assert File.exist?(shim("mm-send"))
   end
+# ---- --version (capability probe for consumers) ----
+#
+# EVERY shim must answer, including ones whose real work needs macOS or a
+# running MailMate — a consumer checking "is the installed gem new enough?"
+# must not have to launch MailMate to find out. Enumerated from the
+# directory, so a new shim that forgets the VersionFlag call fails here.
+
+def test_every_shim_reports_the_gem_version
+  Dir[File.join(EXE_DIR, "*")].map { |f| File.basename(f) }.sort.each do |name|
+    out, _err, status = spawn_shim(name, "--version")
+    assert_equal 0, status.exitstatus, "exe/#{name} --version exited #{status.exitstatus}"
+    assert_includes out, Mailmate::VERSION, "exe/#{name} --version did not report the gem version"
+    assert_includes out, name, "exe/#{name} --version did not name itself"
+  end
+end
+
+def test_short_version_flag_works_too
+  out, _err, status = spawn_shim("mmsearch", "-V")
+  assert_equal 0, status.exitstatus
+  assert_includes out, Mailmate::VERSION
+end
+
+# --version must win over any other argv: a consumer probing an OLD binary
+# passes only --version, but one probing a possibly-new build may pass it
+# alongside flags the old build would forward to emate rather than reject.
+def test_version_short_circuits_other_flags
+  out, _err, status = spawn_shim("mm-send", "--reply-to", "1", "--version")
+  assert_equal 0, status.exitstatus
+  assert_includes out, Mailmate::VERSION
+end
 end

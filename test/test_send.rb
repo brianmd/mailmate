@@ -111,4 +111,161 @@ class TestSend < Minitest::Test
       assert_equal 0, stdin_io.pos
     end
   end
+
+  # ---- --reply-to / --reply-all-to / --forward ----
+  #
+  # The derivation itself is covered in test_reply_prefill.rb; these assert
+  # the CLI contract on top of it — what lands in emate's argv, and that the
+  # merge rule ("explicit wins, omitted follows reply rules") holds.
+
+  # Stub the derivation so these tests exercise argv assembly only, with no
+  # dependence on a resolvable message.
+  def with_prefill(prefill)
+    orig = Mailmate::ReplyPrefill.method(:build)
+    Mailmate::ReplyPrefill.define_singleton_method(:build) { |_id, **_kw| prefill }
+    yield
+  ensure
+    Mailmate::ReplyPrefill.define_singleton_method(:build, orig)
+  end
+
+  def sample_prefill(**over)
+    Mailmate::ReplyPrefill::Prefill.new(**{
+      mode: "reply", from: "me@example.com", to: ["parent@example.com"], cc: [],
+      subject: "Re: Closet flickering", in_reply_to: "<parent@example.com>",
+      references: "<root@example.com> <parent@example.com>",
+      quoted_body: "On Tue, someone wrote:\n> it flickers\n",
+      parent_message_id: "<parent@example.com>", parent_eml_id: 42
+    }.merge(over))
+  end
+
+  # Run Send.run against a fake emate and return everything it captured.
+  def captured_argv(argv, body: "Body", prefill: nil)
+    prefill ||= sample_prefill
+    Dir.mktmpdir do |dir|
+      capture = File.join(dir, "capture.txt")
+      fake = write_fake_emate(dir, capture)
+      with_emate(fake) do
+        with_prefill(prefill) do
+          with_stdin(body) { capture_subprocess_io { Mailmate::CLI::Send.run(argv) } }
+        end
+      end
+      return File.read(capture)
+    end
+  end
+
+  def test_reply_to_splices_recipient_subject_and_threading_headers
+    out = captured_argv(["--reply-to", "<parent@example.com>"])
+    assert_includes out, "-t parent@example.com"
+    assert_includes out, "-s Re: Closet flickering"
+    assert_includes out, "--header In-Reply-To: <parent@example.com>"
+    assert_includes out, "--header References: <root@example.com> <parent@example.com>"
+    # Our own flag never reaches emate, which knows nothing about it.
+    refute_includes out, "--reply-to"
+  end
+
+  def test_explicitly_passed_fields_win_over_derived_ones
+    out = captured_argv(["-t", "someone@example.com", "-s", "My subject", "--reply-to", "<p@example.com>"])
+    assert_includes out, "-t someone@example.com"
+    assert_includes out, "-s My subject"
+    refute_includes out, "-t parent@example.com"
+    refute_includes out, "Re: Closet flickering"
+  end
+
+  # The whole point of the feature: overriding a visible field must not
+  # quietly drop the invisible headers that make it a reply.
+  def test_overriding_recipients_does_not_drop_the_threading_headers
+    out = captured_argv(["-t", "someone@example.com", "--reply-to", "<p@example.com>"])
+    assert_includes out, "--header In-Reply-To: <parent@example.com>"
+  end
+
+  def test_a_hand_set_threading_header_is_not_duplicated
+    out = captured_argv(["--header", "In-Reply-To: <mine@example.com>", "--reply-to", "<p@example.com>"])
+    assert_includes out, "--header In-Reply-To: <mine@example.com>"
+    refute_includes out, "In-Reply-To: <parent@example.com>"
+    # References wasn't hand-set, so ours still applies.
+    assert_includes out, "--header References: <root@example.com> <parent@example.com>"
+  end
+
+  def test_the_quoted_original_is_appended_below_the_caller_body
+    out = captured_argv(["--reply-to", "<p@example.com>"], body: "On it.")
+    body = out.split("--- STDIN ---").last
+    assert_match(/On it\.\s+On Tue, someone wrote:/m, body)
+    assert_includes body, "> it flickers"
+  end
+
+  def test_no_quote_suppresses_the_quoted_original
+    out = captured_argv(["--reply-to", "<p@example.com>", "--no-quote"], body: "On it.")
+    body = out.split("--- STDIN ---").last
+    refute_includes body, "it flickers"
+    refute_includes out, "--no-quote"
+  end
+
+  def test_reply_all_passes_the_mode_through_to_the_derivation
+    seen = nil
+    prefill = sample_prefill
+    orig = Mailmate::ReplyPrefill.method(:build)
+    Mailmate::ReplyPrefill.define_singleton_method(:build) do |_id, **kw|
+      seen = kw[:mode]
+      prefill
+    end
+    begin
+      Dir.mktmpdir do |dir|
+        fake = write_fake_emate(dir, File.join(dir, "capture.txt"))
+        with_emate(fake) { with_stdin("b") { capture_subprocess_io { Mailmate::CLI::Send.run(["--reply-all-to", "1"]) } } }
+      end
+    ensure
+      Mailmate::ReplyPrefill.define_singleton_method(:build, orig)
+    end
+    assert_equal "reply-all", seen
+  end
+
+  def test_forward_carries_no_threading_headers
+    fwd = sample_prefill(mode: "forward", to: [], in_reply_to: nil, references: nil, subject: "Fwd: Closet flickering")
+    out = captured_argv(["--forward", "1", "-t", "new@example.com"], prefill: fwd)
+    assert_includes out, "-t new@example.com"
+    assert_includes out, "-s Fwd: Closet flickering"
+    refute_includes out, "In-Reply-To"
+    refute_includes out, "References"
+  end
+
+  # --print-prefill is a QUERY: it must answer without a launchable MailMate,
+  # because markdownr calls it to fill a form on a machine where emate may be
+  # missing or the app not running.
+  def test_print_prefill_emits_json_and_never_execs_emate
+    require "json"
+    out_io = StringIO.new
+    old_out = $stdout
+    status = nil
+    begin
+      $stdout = out_io
+      with_emate("/nonexistent/emate") do
+        with_prefill(sample_prefill) { status = Mailmate::CLI::Send.run(["--reply-to", "1", "--print-prefill"]) }
+      end
+    ensure
+      $stdout = old_out
+    end
+    assert_equal 0, status
+    parsed = JSON.parse(out_io.string)
+    assert_equal "<parent@example.com>", parsed["in_reply_to"]
+    assert_equal "<root@example.com> <parent@example.com>", parsed["references"]
+    assert_equal ["parent@example.com"], parsed["to"]
+  end
+
+  def test_print_prefill_without_a_parent_is_an_error
+    status = nil
+    capture_subprocess_io { status = Mailmate::CLI::Send.run(["--print-prefill"]) }
+    assert_equal 1, status
+  end
+
+  def test_two_parent_flags_is_an_error
+    status = nil
+    capture_subprocess_io { status = Mailmate::CLI::Send.run(["--reply-to", "1", "--forward", "2"]) }
+    assert_equal 1, status
+  end
+
+  def test_parent_flag_without_a_value_is_an_error
+    status = nil
+    capture_subprocess_io { status = Mailmate::CLI::Send.run(["--reply-to"]) }
+    assert_equal 1, status
+  end
 end

@@ -69,7 +69,23 @@ module Mailmate
       date sent received time
       from to cc bcc subject body
       in label folder mailbox category filename
+      date_last_viewed
     ].freeze
+
+    # MailMate's OWN attribute vocabulary, minus the leading `#` — a model
+    # that has seen the engine's internals or MailMate's docs reaches for
+    # `date-received:` in good faith (dogfood 2026-08-13: an agent queried
+    # `date-received:8/13/2026-8/14/2026`, got zero rows with no advisory,
+    # and reported the mailbox empty). Keys are normalized (`-` → `_`,
+    # lowercased) and then aliased to the base foreign key here, so a
+    # compound key flows through the SAME translation and flagging pipeline
+    # as its base — nothing downstream knows compounds exist.
+    # `date_last_viewed` has no faithful `d` equivalent (viewed ≠ received),
+    # so it is only flagged (via FOREIGN_KEYS above), never translated.
+    KEY_ALIASES = {
+      "date_received" => "date", "received_date" => "date", "datereceived" => "date",
+      "date_sent" => "sent", "sent_date" => "sent", "datesent" => "sent", "sentdate" => "sent",
+    }.freeze
 
     # Spec placeholders for the zero-result hint, for foreign keys whose value
     # translate() could NOT rewrite (e.g. `after:8am`). Keys absent here still
@@ -101,6 +117,8 @@ module Mailmate
       ["newer_than:2d / older_than:2w",              "d 2d / d !2w"],
       ["after:2026-05 or since:2026-05",             "d >=2026-05"],
       ["before:2026-08 / until:2026-08",             "d <2026-08 / d <=2026-08"],
+      ["date:8/13/2026-8/14/2026 (also A..B)",       "d >=2026-08-13 d <=2026-08-14"],
+      ["date-received: / date-sent: (MailMate heads)", "date: / sent:"],
     ].freeze
 
     module_function
@@ -123,7 +141,7 @@ module Mailmate
     # One token: an (optionally key:-prefixed) quoted string, or a bare run
     # of non-space. Quoted regions survive as single tokens so translate()
     # can leave a deliberate literal search (`s "date:today"`) alone.
-    TOKEN_RX = /(?:[-!]?[A-Za-z_]+:)?"[^"]*"|(?:[-!]?[A-Za-z_]+:)?'[^']*'|\S+/
+    TOKEN_RX = /(?:[-!]?[A-Za-z_][A-Za-z_-]*:)?"[^"]*"|(?:[-!]?[A-Za-z_][A-Za-z_-]*:)?'[^']*'|\S+/
 
     # Rewrite foreign `key:value` tokens to their exact quicksearch
     # equivalent, leaving everything else byte-for-byte intact. Returns
@@ -170,8 +188,8 @@ module Mailmate
     # search for the literal text `s "date:today"` is not a mistake.
     def foreign_tokens(query)
       unquoted = query.to_s.gsub(/"[^"]*"|'[^']*'/, " ")
-      unquoted.scan(/(?<![\w-])!?([A-Za-z_]+):(\S*)/).filter_map do |key, value|
-        k = key.downcase
+      unquoted.scan(/(?<![\w-])!?([A-Za-z_][A-Za-z_-]*):(\S*)/).filter_map do |key, value|
+        k = normalize_key(key)
         next unless FOREIGN_KEYS.include?(k)
         ["#{key}:#{value}", k]
       end.uniq { |_token, k| k }
@@ -198,13 +216,21 @@ module Mailmate
 
     # ---- translation internals -------------------------------------------
 
+    # `Date-Received` / `date_received` / `datereceived` all mean the same
+    # thing to the person typing them; collapse to one spelling, then map
+    # MailMate-head aliases onto their base key.
+    def normalize_key(raw)
+      k = raw.downcase.tr("-", "_")
+      KEY_ALIASES.fetch(k, k)
+    end
+
     # nil = not a rewritable token (not key:value, unknown key, or a value
     # with no faithful equivalent).
     def translate_token(token, today, european = false)
-      m = token.match(/\A(?<neg>[-!])?(?<key>[A-Za-z_]+):(?<value>.+)\z/m)
+      m = token.match(/\A(?<neg>[-!])?(?<key>[A-Za-z_][A-Za-z_-]*):(?<value>.+)\z/m)
       return nil unless m
 
-      key   = m[:key].downcase
+      key   = normalize_key(m[:key])
       value = unquote(m[:value])
       return nil if value.empty?
 
@@ -255,11 +281,51 @@ module Mailmate
       return translate_after(v.delete_suffix("-today"), today, european) if v.end_with?("-today")
       return "d #{v}" if v =~ /\A\d+[dwmy]\z/
 
-      (period = normalize_period(v, european)) && "d #{period}"
+      if (period = normalize_period(v, european))
+        "d #{period}"
+      else
+        translate_range(v, today, european)
+      end
+    end
+
+    # A two-sided absolute range (`8/13/2026-8/14/2026`, `2026-08-13..2026-08-14`)
+    # → the comparison pair `d >=A d <=B`. Inclusive on both ends: "the 13th
+    # to the 14th" includes the 14th in plain reading. Only fires when BOTH
+    # sides resolve — a side we can't parse means this isn't a range we
+    # understand, and no translation beats a wrong one. A reversed range
+    # still translates: the engine rejects an impossible date combination
+    # with an explicit error, which is exactly the visibility we want.
+    def translate_range(value, today, european)
+      bounds =
+        if value.include?("..")
+          a, b = value.split("..", 2)
+          [resolve_bound(a, today, european), resolve_bound(b, today, european)]
+        else
+          # Dates carry hyphens themselves (2026-08-13), so try each hyphen
+          # as the separator and take the first split where both sides parse.
+          value.length.times.filter_map { |i|
+            next unless value[i] == "-"
+            left  = resolve_bound(value[0...i], today, european)
+            right = resolve_bound(value[(i + 1)..], today, european)
+            [left, right] if left && right
+          }.first
+        end
+      return nil unless bounds&.all?
+
+      "d >=#{bounds[0]} d <=#{bounds[1]}"
+    end
+
+    # One end of a range: a keyword day or any absolute period.
+    def resolve_bound(value, today, european)
+      v = value.to_s.strip.downcase
+      return today.strftime("%Y-%m-%d") if v == "today"
+      return (today - 1).strftime("%Y-%m-%d") if v == "yesterday"
+
+      normalize_period(v, european)
     end
 
     # Gmail's after: includes the named day; since: likewise → >=.
-    def translate_after(value, today, european = false)
+    def translate_after(value, _today, european = false)
       v = value.downcase
       return "d 1d" if v == "today"
       return "d 2d" if v == "yesterday"

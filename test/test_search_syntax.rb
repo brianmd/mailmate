@@ -143,6 +143,56 @@ class TestSearchSyntax < Minitest::Test
     assert_equal "d >=2026-08-10", translated("date:8/10/2026-today")
   end
 
+  def test_translates_absolute_ranges_as_inclusive_comparison_pairs
+    # The 2026-08-13 dogfood query shape: two dash-separated slash dates.
+    assert_equal "d >=2026-08-13 d <=2026-08-14", translated("date:8/13/2026-8/14/2026")
+    # ISO sides carry hyphens of their own — the separator must be found
+    # among them, not assumed to be the first dash.
+    assert_equal "d >=2026-08-13 d <=2026-08-14", translated("date:2026-08-13-2026-08-14")
+    assert_equal "d >=2026-08-13 d <=2026-08-14", translated("date:2026-08-13..2026-08-14")
+    assert_equal "d >=2026-05 d <=2026-07", translated("date:2026-05-2026-07")
+    assert_equal "d >=2026 d <=2027", translated("date:2026-2027")
+  end
+
+  def test_range_with_keyword_bounds
+    assert_equal "d >=2026-08-10 d <=2026-08-11", translated("date:yesterday..today")
+  end
+
+  def test_leaves_unparseable_ranges_alone
+    ["date:next-week", "date:8am-5pm", "date:8/13/2026-forever"].each do |q|
+      assert_equal q, translated(q), "expected #{q.inspect} unchanged"
+    end
+  end
+
+  # MailMate's own attribute heads, minus the '#'. The 2026-08-13 dogfood
+  # failure: `date-received:8/13/2026-8/14/2026` matched the KEY nowhere, so
+  # neither translation nor the zero-result advisory fired — zero rows,
+  # believed. Aliases route compounds through the same pipeline as their base.
+  def test_translates_mailmate_head_aliases
+    assert_equal "d 2026-08-13", translated("date-received:8/13/2026")
+    assert_equal "d 2026-08-13", translated("date_received:2026-08-13")
+    assert_equal "d 2026-08-13", translated("received-date:8/13/2026")
+    assert_equal "d 2026-08-13", translated("date-sent:8/13/2026")
+    assert_equal "d 2026-08-13", translated("Date-Received:8/13/2026")
+    # The exact query from the dogfood transcript, end to end.
+    assert_equal "d >=2026-08-13 d <=2026-08-14",
+                 translated("date-received:8/13/2026-8/14/2026")
+  end
+
+  def test_flags_untranslatable_values_on_mailmate_heads
+    hint = S.zero_result_hint("date-received:8am")
+    assert_includes hint, "date-received:8am"
+    assert_includes hint, "d <date>"
+  end
+
+  def test_flags_date_last_viewed_without_translating
+    # Viewed ≠ received — no faithful `d` equivalent, so it must be flagged
+    # (no silence) but never rewritten (no wrong guess).
+    assert_equal "date-last-viewed:2026-08-13", translated("date-last-viewed:2026-08-13")
+    hint = S.zero_result_hint("date-last-viewed:2026-08-13")
+    assert_includes hint, "date-last-viewed"
+  end
+
   def test_translates_day_first_slash_dates_when_european
     assert_equal "d 2026-08-09", S.translate("date:9/8/2026", today: TODAY, european: true).first
     assert_equal "d <2026-08-09", S.translate("before:9/8/2026", today: TODAY, european: true).first

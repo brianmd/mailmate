@@ -44,5 +44,8 @@ task :release do
   # which is what the pre-push hook's escape hatch is for.
   sh({ "GIT_SYNC" => "1" }, "git", "push", "origin", "refs/tags/v#{version}")
   sh "gem", "push", "mailmate-#{version}.gem" # prompts for the RubyGems OTP
-  puts "\nreleased mailmate #{version} — remember: gem install ./mailmate-#{version}.gem to update PATH"
+  # Install the exact artifact just published, so PATH can never lag the
+  # release — the last drift this task didn't already close.
+  sh "gem", "install", "./mailmate-#{version}.gem", "--no-document"
+  puts "\nreleased mailmate #{version} (published, tagged, synced, installed)"
 end

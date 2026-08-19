@@ -208,6 +208,56 @@ class TestCliSearch < Minitest::Test
     assert_nil S.date_spec_error(S.parse_search("is:unread has:attachment d 7d").first)
   end
 
+  def test_is_archived_reads_the_path
+    with_state_readers do
+      groups = S.parse_search("is:archived")
+      assert S.matches?(nil, "1", groups, true, "/imap/x/Archive.mailbox/Messages/1.eml")
+      refute S.matches?(nil, "1", groups, true, "/imap/x/INBOX.mailbox/Messages/1.eml")
+      refute S.matches?(nil, "1", S.parse_search("-is:archived"), true, "/imap/x/Archive.mailbox/Messages/1.eml")
+    end
+  end
+
+  # ---- arbitrary header specs ----
+
+  def test_parse_search_header_specs_are_native
+    assert_equal [[[:header, "delivered-to:joe", false]]], S.parse_search("delivered-to:joe")
+    assert_equal [[[:header, "delivered-to:joe", true]]],  S.parse_search("!delivered-to:joe")
+    assert_equal [[[:header, "x-mailer.name:mailmate", false]]], S.parse_search("x-mailer.name:mailmate")
+    # Foreign keys stay literal (the translator/hint pipeline owns them),
+    # URL-shaped tokens stay literal, quoted tokens stay literal.
+    assert_equal [[[:message_or_body, "after:8am", false]]], S.parse_search("after:8am")
+    assert_equal [[[:message_or_body, "date-received:8am", false]]], S.parse_search("date-received:8am")
+    assert_equal [[[:message_or_body, "http://example.com", false]]], S.parse_search("http://example.com")
+    assert_equal [[[:message_or_body, "delivered-to:joe", false]]], S.parse_search('"delivered-to:joe"')
+  end
+
+  HEADER_MAP = { 10 => "joe@example.com", 11 => "ann@example.com" }.freeze
+  FakeHeaderReader = Struct.new(:x) do
+    def value_for(id) = HEADER_MAP[id]
+  end
+
+  def test_header_specs_match_via_index
+    readers = { "delivered-to" => FakeHeaderReader.new }
+    S.stub(:reader_for, ->(name) { readers[name] }) do
+      groups = S.parse_search("delivered-to:joe")
+      assert S.matches?(nil, "10", groups, true)
+      refute S.matches?(nil, "11", groups, true)
+      # Subpath is ignored: the whole header value is the haystack.
+      assert S.matches?(nil, "10", S.parse_search("delivered-to.name:joe"), true)
+    end
+  end
+
+  def test_date_spec_error_flags_unindexed_headers
+    S.stub(:reader_for, ->(_name) { nil }) do
+      err = S.date_spec_error(S.parse_search("x-no-such-header:foo").first)
+      assert_includes err, "x-no-such-header"
+      assert_includes err, "literal"
+    end
+    S.stub(:reader_for, ->(_name) { FakeHeaderReader.new }) do
+      assert_nil S.date_spec_error(S.parse_search("delivered-to:joe").first)
+    end
+  end
+
   # ---- date_matches? ----
 
   def make_mail(date:)
@@ -307,12 +357,48 @@ class TestCliSearch < Minitest::Test
     assert S.date_matches?(two_hours, nil, "<1h") # older than the 1h window
   end
 
+  # Calendar units floor to the unit start (app parity: "1y means this year
+  # and not 365 days"). Ranges are tested through compile_period_range with
+  # a fixed `today` so the assertions don't drift with the clock.
+  def test_relative_units_floor_to_unit_start
+    today = Date.new(2026, 8, 18) # a Tuesday
+    assert_equal [20260818, 9999_12_31], S.compile_period_range("1d", today)
+    assert_equal [20260817, 9999_12_31], S.compile_period_range("1w", today)  # Monday this week
+    assert_equal [20260810, 9999_12_31], S.compile_period_range("2w", today)
+    assert_equal [20260801, 9999_12_31], S.compile_period_range("1m", today)
+    assert_equal [20260701, 9999_12_31], S.compile_period_range("2m", today)
+    assert_equal [20260101, 9999_12_31], S.compile_period_range("1y", today)
+    assert_equal [20250101, 9999_12_31], S.compile_period_range("2y", today)
+  end
+
   def test_date_matches_relative_weeks_months_years
-    one_year_ago = (Date.today << 12).to_time
-    mail = make_mail(date: one_year_ago + 86_400) # one day inside the year window
+    # This-year mail matches 1y; last-year mail needs 2y.
+    jan1 = Date.new(Date.today.year, 1, 1).to_time + 12 * 3600
+    mail = make_mail(date: jan1)
     assert S.date_matches?(mail, nil, "1y")
-    assert S.date_matches?(mail, nil, "12m")
-    assert S.date_matches?(mail, nil, "53w")
+    prev = make_mail(date: jan1 - 2 * 86_400) # Dec 30 last year
+    refute S.date_matches?(prev, nil, "1y")
+    assert S.date_matches?(prev, nil, "2y")
+  end
+
+  def test_day_of_month_terms_pick_most_recent_occurrence
+    today = Date.new(2026, 8, 18)
+    assert_equal [20260807, 20260807], S.compile_period_range("7", today)
+    assert_equal [20260818, 20260818], S.compile_period_range("18", today)
+    assert_equal [20260720, 20260720], S.compile_period_range("20", today)   # still ahead this month
+    assert_equal [20260131, 20260131], S.compile_period_range("31", Date.new(2026, 3, 5)) # Feb has no 31st
+    assert_nil S.compile_period_range("32", today)
+    assert_nil S.compile_period_range("365", today)
+  end
+
+  def test_month_day_terms_pick_most_recent_occurrence
+    today = Date.new(2026, 8, 18)
+    assert_equal [20260704, 20260704], S.compile_period_range("7-4", today)   # M-D: July 4
+    assert_equal [20251225, 20251225], S.compile_period_range("12-25", today) # last Christmas
+    S.date_order = :dmy
+    assert_equal [20260407, 20260407], S.compile_period_range("7-4", today)   # D-M: April 7
+  ensure
+    S.date_order = :mdy
   end
 
   def test_date_matches_invalid_term_returns_false

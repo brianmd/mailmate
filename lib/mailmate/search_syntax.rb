@@ -24,10 +24,11 @@ module Mailmate
       ["a <term>", "any address header contains"],
       ["b <term>", "body contains"],
       ["m <term>", "common headers OR body (same as a bare term)"],
-      ["d <date>", "received: Nh (rolling clock hours), Nd|Nw|Nm|Ny (N calendar units ending today; 1d = today), or Y, Y-M, Y-M-D"],
+      ["d <date>", "received: Nh (rolling clock hours), Nd|Nw|Nm|Ny (calendar, floored: 1d = today, 1w = this week, 1y = this year), Y | Y-M | Y-M-D, or D | M-D (day of month, most recent occurrence)"],
       ["T <tag>",  "tag / IMAP keyword contains (K is a synonym)"],
-      ["is:<state>", "message state: unread, read, flagged, replied, draft"],
-      ["has:attachment", "root MIME is multipart/mixed (the standard attachment layout)"],
+      ["is:<state>", "message state: unread, read, flagged, replied, draft, archived"],
+      ["has:attachment", "root MIME is multipart/mixed (wrappers like signed/related are opened and checked)"],
+      ["<header>:<term>", "any indexed header contains (delivered-to:joe); unknown header = error"],
     ].freeze
 
     EXAMPLES = [
@@ -39,7 +40,8 @@ module Mailmate
       ["d 24h",                   "received in the last 24 hours (rolling, not calendar)"],
       ["d >=2026-05 d <2026-08",  "received May through July 2026"],
       ["d 1h or 2026-08-09",      "last hour, plus everything from Aug 9"],
-      ["is:unread d 7d",          "unread, received in the last 7 days"],
+      ["is:unread d 1w",          "unread, received this week"],
+      ["d 7",                     "day 7 of this month (last month's if the 7th is still ahead)"],
       ["T urgent",                "tagged 'urgent'"],
     ].freeze
 
@@ -260,6 +262,14 @@ module Mailmate
         (rel = parse_relative(value)) && "d #{rel}"
       when "older_than", "older"
         (rel = parse_relative(value)) && "d !#{rel}"
+      when "in"
+        # Archive state is path-derived, so Gmail's location idiom maps onto
+        # the is:archived state spec. Other locations (in:trash, in:spam)
+        # have no equivalent and stay flagged.
+        case value.downcase
+        when "archive", "archived" then "is:archived"
+        when "inbox"               then "!is:archived"
+        end
       end
     end
 

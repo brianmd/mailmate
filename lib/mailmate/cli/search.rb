@@ -405,6 +405,14 @@ module Mailmate
               # Gmail callers actually write.
               negate ||= operand.start_with?("-")
               specs << [:state, operand.delete_prefix("-").downcase, negate]
+            elsif !quoted && (hdr = header_spec_token(operand))
+              # Arbitrary header specs (delivered-to:joe) — native app
+              # syntax per the manual. Foreign keys (date:, from:, ...) never
+              # reach here: translate() rewrote the translatable ones before
+              # parsing, and the rest stay literal so zero_result_hint can
+              # suggest their quicksearch equivalent.
+              negate ||= operand.start_with?("-")
+              specs << [:header, hdr, negate]
             else
               # A bare term opening an or-group inherits the modifier in
               # force (`d 2024 or 2025`). Elsewhere it is MailMate's
@@ -420,13 +428,29 @@ module Mailmate
         [specs, in_force]
       end
 
+      # The downcased "name:value" for a bare token that should parse as an
+      # arbitrary-header spec, nil otherwise. Excluded: keys the translator
+      # owns (FOREIGN_KEYS — their untranslatable forms stay literal for the
+      # zero-result hint), state keys (is/has, handled first), and
+      # URL-shaped tokens (http://... is a term, not a search of the
+      # nonexistent "http" header).
+      def header_spec_token(operand)
+        m = operand.match(/\A-?([A-Za-z][\w-]*(?:\.[\w.-]+)?):(\S+)\z/)
+        return nil unless m
+        return nil if m[2].start_with?("/")
+        key = Mailmate::SearchSyntax.normalize_key(m[1].sub(/\..*/, ""))
+        return nil if Mailmate::SearchSyntax::FOREIGN_KEYS.include?(key)
+        return nil if %w[is has].include?(key)
+        "#{m[1]}:#{m[2]}".downcase
+      end
+
       # Static cost rank per spec field for AND evaluation order: compiled
       # date compare < header/tag index lookup < body matching (resolves
       # part-ids and walks every body segment). Used by order_specs.
       SPEC_COST = {
         date: 0,
         from: 1, recipients: 1, cc: 1, subject: 1, address_any: 1, any: 1,
-        tag: 1, keyword: 1, state: 1,
+        tag: 1, keyword: 1, state: 1, header: 1,
         body: 2, message_or_body: 2,
       }.freeze
 
@@ -438,6 +462,7 @@ module Mailmate
         "flagged" => :flagged, "starred" => :flagged,
         "replied" => :replied, "answered" => :replied,
         "draft" => :draft,
+        "archived" => :archived, "archive" => :archived,
         "attachment" => :attachment, "attachments" => :attachment,
       }.freeze
 
@@ -528,16 +553,23 @@ module Mailmate
         if term =~ /\A(\d+)([dwmy])\z/
           n, u = Regexp.last_match(1).to_i, Regexp.last_match(2)
           return nil if n.zero? # a zero-length window matches nothing
-          # N units ENDING today: `1d` = today only, `7d` = the last 7
-          # calendar days including today. (Off-by-one fixed 2026-08-11 to
-          # match the MailMate app, where `d 1d` is today's mail — the old
-          # cutoff of today-N made `d 1d` span two calendar days. For a
-          # rolling 24-hour clock window, that's `d 24h` now.)
+          # Calendar units floored to the unit start, matching the app's
+          # documented semantics ("1y means this year and not 365 days"):
+          # 1d = today, 1w = this ISO week (from Monday), 1m = this month,
+          # 1y = this year; N reaches back N-1 further units. Only `Nh` is a
+          # rolling clock window — that split is deliberate (2026-08-18):
+          # calendar words mean calendar spans, and "the last 24 hours" is
+          # spelled d 24h.
           cutoff = case u
                    when "d" then today - (n - 1)
-                   when "w" then today - (n * 7 - 1)
-                   when "m" then (today << n) + 1
-                   when "y" then (today << (n * 12)) + 1
+                   when "w"
+                     start = today - (7 * (n - 1))
+                     start - (start.cwday - 1)
+                   when "m"
+                     start = today << (n - 1)
+                     Date.new(start.year, start.month, 1)
+                   when "y"
+                     Date.new(today.year - (n - 1), 1, 1)
                    end
           return [ymd_int(cutoff), 9999_12_31]
         end
@@ -547,15 +579,34 @@ module Mailmate
 
         case parts.size
         when 1
-          y = parts[0].to_i
-          return nil if y.zero?
-          [y * 10_000 + 101, y * 10_000 + 1231]
+          if parts[0].length == 4
+            y = parts[0].to_i
+            return nil if y.zero?
+            [y * 10_000 + 101, y * 10_000 + 1231]
+          else
+            # App semantics: a bare small number is a day of the current
+            # month — or the most recent month containing that day when it
+            # hasn't happened yet (`d 7` on the 5th = last month's 7th).
+            most_recent_day_range(parts[0].to_i, today)
+          end
         when 2
-          # Year-first (2026-08) or month-first with a 4-digit year (8/2026).
-          y, m = parts[1].length == 4 ? [parts[1], parts[0]] : [parts[0], parts[1]]
-          y, m = y.to_i, m.to_i
-          return nil if y.zero? || !(1..12).cover?(m)
-          [y * 10_000 + m * 100 + 1, y * 10_000 + m * 100 + 31]
+          if parts[1].length == 4
+            # Month-first with a 4-digit year (8/2026).
+            y, m = parts[1].to_i, parts[0].to_i
+            return nil if y.zero? || !(1..12).cover?(m)
+            [y * 10_000 + m * 100 + 1, y * 10_000 + m * 100 + 31]
+          elsif parts[0].length == 4
+            # Year-first (2026-08).
+            y, m = parts[0].to_i, parts[1].to_i
+            return nil if y.zero? || !(1..12).cover?(m)
+            [y * 10_000 + m * 100 + 1, y * 10_000 + m * 100 + 31]
+          else
+            # No year: month + day, ordered per date_order, most recent
+            # occurrence (`d 12-25` in August = last year's Dec 25).
+            a, b = parts.map(&:to_i)
+            m, d = date_order == :dmy ? [b, a] : [a, b]
+            most_recent_month_day_range(m, d, today)
+          end
         when 3
           # ISO year-first, or slash-date with trailing 4-digit year ordered
           # per date_order. Impossible calendar dates (2026-02-31, month 13)
@@ -590,7 +641,14 @@ module Mailmate
           # would otherwise quietly match no message ever.
           if field == :state && !STATE_CANON.key?(term.split(":", 2).last)
             return "state term cannot match anything: #{term} " \
-                   "(known: is:unread is:read is:flagged is:replied is:draft has:attachment)"
+                   "(known: is:unread is:read is:flagged is:replied is:draft is:archived has:attachment)"
+          end
+          if field == :header
+            name = term.split(":", 2).first.sub(/\..*/, "")
+            if reader_for(name).nil?
+              return "no '#{name}' header index — this MailMate store has never seen that " \
+                     "header. Quote the token (\"#{term}\") to search it as literal text."
+            end
           end
           next unless field == :date
           range = hour_range_for(term) || date_range_for(term)
@@ -611,6 +669,33 @@ module Mailmate
           hi = family.map { |_, r| r[1] }.min
           next if lo <= hi
           return "impossible date range (empty intersection): #{family.map { |t, _| "d #{t}" }.join(" ")}"
+        end
+        nil
+      end
+
+      # Single day for the most recent occurrence of day-of-month `day`,
+      # stepping back past months that lack it (`d 31` in early March =
+      # Jan 31). nil when no month within a year works (day > 31).
+      def most_recent_day_range(day, today)
+        return nil unless (1..31).cover?(day)
+        0.upto(12) do |back|
+          m = today << back
+          next unless Date.valid_date?(m.year, m.month, day)
+          candidate = Date.new(m.year, m.month, day)
+          return [ymd_int(candidate), ymd_int(candidate)] if candidate <= today
+        end
+        nil
+      end
+
+      # Single day for the most recent occurrence of month+day: this year if
+      # it has happened, else last year. nil for impossible dates.
+      def most_recent_month_day_range(month, day, today)
+        return nil unless (1..12).cover?(month) && (1..31).cover?(day)
+        [0, 1].each do |back|
+          y = today.year - back
+          next unless Date.valid_date?(y, month, day)
+          candidate = Date.new(y, month, day)
+          return [ymd_int(candidate), ymd_int(candidate)] if candidate <= today
         end
         nil
       end
@@ -785,25 +870,52 @@ module Mailmate
       end
 
       # term is the full lowercased token ("is:unread", "has:attachment").
-      # Flag states read the #flags index; attachment presence reads the
-      # indexed root content-type — multipart/mixed is the standard
-      # attachment layout (a Mail fallback checks real attachments when the
-      # message is already loaded). Unknown state values never reach here:
+      # Flag states read the #flags index; archive state reads the path
+      # (same source as the flags output column); attachment presence reads
+      # the indexed root content-type — multipart/mixed is the standard
+      # attachment layout. Wrapper types that can HIDE attachments
+      # (signed/encrypted/related) fall back to reading the message and
+      # asking Mail for real attachments; plain and alternative roots are
+      # trusted as attachment-free. Unknown state values never reach here:
       # date_spec_error rejects them up front.
-      def state_matches?(eml_id, mail, term)
+      def state_matches?(eml_id, mail, path, term)
         state = STATE_CANON[term.split(":", 2).last]
         return false unless state
 
         case state
         when :unread
           eml_id ? !message_flags(eml_id).include?("\\Seen") : false
+        when :archived
+          path.to_s.include?("/Archive.mailbox/")
         when :attachment
           ct = eml_id ? (reader_for("content-type")&.value_for(eml_id.to_i) rescue nil).to_s : ""
-          return ct.downcase.include?("multipart/mixed") unless ct.empty?
-          mail ? mail.attachments.any? : false
+          if ct.empty?
+            m = mail || (path && (Mail.read(path) rescue nil))
+            return m ? m.attachments.any? : false
+          end
+          ctl = ct.downcase
+          return true if ctl.include?("multipart/mixed")
+          if ctl.match?(%r{multipart/(signed|encrypted|related)})
+            m = mail || (path && (Mail.read(path) rescue nil))
+            return m ? m.attachments.any? : false
+          end
+          false
         else
           message_flags(eml_id).include?(STATE_FLAGS[state])
         end
+      end
+
+      # term is the downcased "name:value" (subpath allowed on the name and
+      # ignored: `x-mailer.name:mailmate` searches the whole x-mailer value,
+      # which substring matching covers anyway). Index-only by design — a
+      # header this store has never seen has no index, and date_spec_error
+      # reports that up front instead of this method quietly missing.
+      def header_matches?(eml_id, mail, term)
+        name, value = term.split(":", 2)
+        name = name.sub(/\..*/, "")
+        v = eml_id ? (reader_for(name)&.value_for(eml_id.to_i) rescue nil) : nil
+        v = (mail[name]&.to_s rescue nil) if v.nil? && mail
+        v.to_s.b.downcase.include?(value.b)
       end
 
       def message_flags(eml_id)
@@ -906,7 +1018,9 @@ module Mailmate
               when :date
                 date_matches?(mail, eml_id, term)
               when :state
-                state_matches?(eml_id, mail, term)
+                state_matches?(eml_id, mail, path, term)
+              when :header
+                header_matches?(eml_id, mail, term)
               when :any
                 %i[from recipients subject].any? { |f| field_value(eml_id, mail, f).include?(term_b) }
               end

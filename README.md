@@ -185,10 +185,11 @@ mmsearch 'f acme' 'id flags subject from' --limit 20 --no-align
 | `a <term>` | Any address header contains. |
 | `b <term>` | Body (plain text) contains. |
 | `m <term>` | Common headers OR body. |
-| `d <date>` | Received: `Nh` (rolling clock hours, `24h` = last 24 hours), `Nd`/`Nw`/`Nm`/`Ny` (N calendar units ending today — `1d` = today, `2d` = yesterday + today), or absolute `Y`, `Y-M`, `Y-M-D`. Slash dates are month-first American (`8/9/2026` = Aug 9); `--european` flips to day-first. Comparisons on absolute dates: `d >2026-08` (after), `d <2026-08` (before), also `>=`/`<=`. |
+| `d <date>` | Received: `Nh` (rolling clock hours, `24h` = last 24 hours), `Nd`/`Nw`/`Nm`/`Ny` (calendar units floored to the unit start, app parity — `1d` = today, `1w` = this week, `1y` = this year), absolute `Y`, `Y-M`, `Y-M-D`, or day-of-month `D` / `M-D` (`d 7` = the most recent 7th). Slash dates are month-first American (`8/9/2026` = Aug 9); `--european` flips to day-first. Comparisons on absolute dates: `d >2026-08` (after), `d <2026-08` (before), also `>=`/`<=`. |
 | `T <tag>` | Tags / IMAP keywords (`K` is a synonym). |
-| `is:<state>` | Message state: `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft` (Gmail synonyms `starred`/`answered` work; `-is:unread` negates). |
-| `has:attachment` | Root MIME type is `multipart/mixed` — the standard attachment layout. |
+| `is:<state>` | Message state: `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft`, `is:archived` (Gmail synonyms `starred`/`answered` work; `-is:unread` negates; `in:inbox`/`in:archive` translate onto `is:archived`). |
+| `has:attachment` | Root MIME type is `multipart/mixed`; wrapper types (`signed`/`encrypted`/`related`) are opened and checked for real attachments. |
+| `<header>:<term>` | Any indexed header contains (`delivered-to:joe`). A header this store has never seen is a usage error, not an empty result. |
 | `!<value>` | Negate, e.g. `f !smith` = From does NOT contain smith; works on dates too (`d !3d` = more than 3 days ago). |
 
 Dates match on the **display-zone day** — the same day the `date`/`time` output columns show. An impossible date term or combination (`d 2026-02-31`, `d >2026 d <2025`) is a usage error, not a silent empty result. Familiar foreign `key:value` tokens (`from:bob`, `date:today`, `after:2026-08-01`, `older_than:2w`) are auto-translated to quicksearch with each rewrite announced on stderr; unrecognized keys (`is:unread`) are searched as literal text, and an empty result says so.
@@ -432,6 +433,8 @@ A few rough edges to be aware of:
 4. **Single-account `mm-send` defaults.** `mm-send` passes flags straight through to `emate mailto`. If you have multiple identities configured in MailMate and don't pass `-f`, MailMate picks the default identity — there's no opinionated multi-account routing in the wrapper.
 
 ## Status
+
+1.9.0 — App-parity search release. Arbitrary header specs are native (`delivered-to:joe`, `x-mailer.name:mailmate` — subpaths search the whole header value); index-only by design: a header the store has never seen is a usage error suggesting quotes, never a `Mail.read` per candidate. Relative calendar units now floor to the unit start, matching the app's documented semantics (`1w` = this week, `1y` = this year; `Nh` stays a rolling clock window on purpose). Day-of-month terms (`d 7` = the most recent 7th, `d 12-25` = last Christmas) close the last known silent-empty. `is:archived` joins the state specs (path-derived, same source as the flags column), with `in:inbox`/`in:archive` translating onto it; `has:attachment` now opens `multipart/signed`/`encrypted`/`related` wrappers and checks for real attachments. New `rake release` runs the whole mechanical release — clean-tree + green-tests + unreleased-version guards, then build, tag, sync, `gem push`.
 
 1.8.0 — Reply derivation, and message-state specs.
 

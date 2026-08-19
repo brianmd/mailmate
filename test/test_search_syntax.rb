@@ -198,6 +198,13 @@ class TestSearchSyntax < Minitest::Test
     assert_equal "d <2026-08-09", S.translate("before:9/8/2026", today: TODAY, european: true).first
   end
 
+  def test_translates_in_location_to_archive_state
+    assert_equal "is:archived", translated("in:archive")
+    assert_equal "is:archived", translated("in:archived")
+    assert_equal "!is:archived", translated("in:inbox")
+    assert_equal "in:trash", translated("in:trash") # no equivalent; stays flagged
+  end
+
   def test_translates_after_before_until_as_comparisons
     assert_equal "d >=2026-08-01", translated("after:2026-08-01")
     assert_equal "d >=2026-08-01", translated("since:8/1/2026")
@@ -213,8 +220,8 @@ class TestSearchSyntax < Minitest::Test
   end
 
   def test_leaves_untranslatable_values_and_keys_alone
-    ["after:8am", "is:unread", "has:attachment", "in:inbox",
-     "date:next-week", "date:31/12/2026",
+    ["after:8am", "is:unread", "has:attachment",
+     "date:next-week", "date:31/12/2026", "in:trash",
      "re:launch", "b http://example.com", "d 1d", "f substack d 7d"].each do |q|
       assert_equal q, translated(q), "expected #{q.inspect} unchanged"
     end

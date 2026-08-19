@@ -8,7 +8,7 @@ closed_date:
 
 # Quicksearch parity with MailMate app
 
-## Status: 🟡 in progress (phases 1, 2, 4 shipped 2026-08-11; phase 3 idea)
+## Status: 🟢 all phases shipped (1, 2, 4 on 2026-08-11; 3 plus the date-semantics parity items on 2026-08-18)
 
 ## Progress
 
@@ -16,7 +16,7 @@ closed_date:
 |-------|-------|--------|---------|
 | [[#Phase 1 — Date comparisons (`d <2026-08`, `d >2026-08`)|1]] | absolute date ranges | ✅ Done | 2026-08-11 |
 | [[#Phase 2 — Boolean OR (and binds tighter, no parens)|2]] | `f bob s invoice or f ann s invoice` | ✅ Done | 2026-08-11 |
-| [[#Phase 3 — Arbitrary header specs|3]] | `delivered-to:joe`, `x-mailer.name:mailmate` | 🕓 Pending | — |
+| [[#Phase 3 — Arbitrary header specs|3]] | `delivered-to:joe`, `x-mailer.name:mailmate` | ✅ Done | 2026-08-18 |
 | [[#Phase 4 — Message-state specs (unread, flagged, attachments)|4]] | `is:unread` / `has:attachment` as native specs | ✅ Done | 2026-08-11 |
 
 ## Context
@@ -50,21 +50,21 @@ The modifier-distribution question resolved toward the app's shorthand: a group 
 
 ## Phase 3 — Arbitrary header specs
 
-The app can search any header by name, including structured sub-paths: `delivered-to:joe`, `x-mailer.name:mailmate`. The gem has only the fixed modifier set.
+**Shipped 2026-08-18.** The app can search any header by name (`delivered-to:joe`, `x-mailer.name:mailmate` — confirmed native app syntax by the manual). Both open questions resolved as planned:
 
-If pursued, two open questions before code:
+1. **Collision rule, as proposed:** keys the translator owns (`FOREIGN_KEYS`, via `normalize_key` so aliased compounds like `date-received` stay with the translator) and the state keys (`is`/`has`) never become header specs; their untranslatable forms stay literal so `zero_result_hint` keeps suggesting equivalents. Everything else `key:value`-shaped and unquoted parses as a real header spec (URL-shaped tokens like `http://…` excepted). Negation via `!` or Gmail-style `-`.
+2. **Index coverage, per user decision (2026-08-18): index-only, no `Mail.read` fallback.** A header with no index has never been seen by this store, so zero matches is truthful — but rather than a silent empty, it is a usage error: `no 'x-foo' header index — … Quote the token to search it as literal text.`
 
-1. **Syntax collision with the foreign-token translator.** `delivered-to:joe` is exactly the `key:value` shape that `SearchSyntax.translate` inspects and `zero_result_hint` flags. Rule needs deciding up front — e.g. known foreign keys keep translating, anything else with a `:` becomes a real header spec (which would *retire* the "searched as literal text" trap wholesale — likely the right end state, and worth calling out as the phase's real payoff).
-2. **Index coverage.** Fixed modifiers ride MailMate's per-header indexes (`#from#lc` etc.). Arbitrary headers may have no index, forcing `Mail.read` per candidate — fine as a correctness fallback, but the cost cliff should be visible (a note in `--help`, or a spec-cost tier that evaluates these last, as body matching does today).
-
-Verify the app's actual sub-path vocabulary (`.name`, `.address`, others?) against MailMate's manual/behavior before implementing.
+Scope note: sub-paths (`.name`) are accepted and *ignored* — matching is substring over the whole indexed header value, which covers what a sub-path would select anyway. Multi-word header values (`delivered-to:"joe smith"`) don't tokenize; single-word values only for now.
 
 ## Phase 4 — Message-state specs (unread, flagged, attachments)
 
 **Shipped 2026-08-11.** The app's manual (checked per the plan below) settled the vocabulary question decisively: **the app has no state vocabulary in its toolbar search** — its `A` modifier searches attachment *filenames*, and there is no unread/flagged shorthand at all. With nothing to mirror, the familiar Gmail spellings became first-class quicksearch: `is:unread`, `is:read`, `is:flagged`, `is:replied`, `is:draft`, `has:attachment`, plus the synonyms callers actually type (`is:starred`, `is:answered`, `has:attachments`) and Gmail-style `-is:unread` negation alongside `!`. Flag states read the `#flags` index (`\Seen`, `\Flagged`, `\Answered`, `\Draft`; unread = absence of `\Seen`); attachment presence reads the indexed root `content-type` for `multipart/mixed`, with a real `mail.attachments.any?` fallback when the message is already loaded (there is no `#filename` index locally, so the app's `A` filename search stays out of reach). Unknown state values (`is:snoozed`) are usage errors naming the known states — the same validation pre-pass as dates. `is`/`has` left the translator's `FOREIGN_KEYS`; they are no longer foreign.
 
-> [!note] App-manual findings 2026-08-11 (from the bundled help, § Toolbar Search)
-> Read while settling Phase 4; several affect the remaining plan. (1) **Phase 3 is confirmed native app syntax**: `delivered-to:joe x-mailer.name:mailmate` appears verbatim in the manual — the app transforms the search language via an external script. (2) The app supports **operand parens sharing a modifier**: `t (smith or joe)` — narrower than expression-tree grouping, and possibly worth adopting where our modifier inheritance doesn't reach. (3) Unimplemented modifiers: `q` (quoted text), `M` (like `m` including quoted text), `A` (attachment filenames — blocked on index availability), and the app distinguishes `T` (tags) from `K` (*all* IMAP keywords) where we treat them as synonyms. (4) The app **floors relative dates to the beginning of the unit**: `1y` = this calendar year, `1w` = this week. Ours are N units *ending today* — identical for `Nd`, divergent for `w`/`m`/`y`. (5) App slash dates are **day-month-year with right-side parts optional** (`d 7` = day 7 of the current month, `d 7-4` = April 7); we deliberately chose American M/D/Y with `--european`, and `d 7` parses as year 7 — a small honest divergence worth revisiting.
+> [!note] App-manual findings 2026-08-11 (from the bundled help, § Toolbar Search) — updated 2026-08-18
+> Read while settling Phase 4. Resolved since: (1) Phase 3 shipped (see above). (4) **Resolved 2026-08-18** — relative units now floor to the unit start like the app (`1y` = this year, `1w` = this ISO week from Monday, `1m` = this month); only `Nh` stays a rolling clock window, deliberately: calendar words mean calendar spans, "the last 24 hours" is spelled `d 24h`. (5) **Resolved 2026-08-18** — `d 7` = the most recent day-7 (stepping past months lacking the day: `d 31` in early March = Jan 31), `d 7-4` = most recent month+day, ordered per `date_order` (M-D American default, D-M under `--european`); year forms require 4 digits.
+>
+> Still open, waiting on demand: (2) operand parens sharing a modifier (`t (smith or joe)`); (3) `q` (quoted text) and `M` (m incl. quoted) modifiers, the `T`-vs-`K` distinction (app: tags vs *all* IMAP keywords), and `A` attachment-filename search (blocked: no `#filename` index in the store).
 
 ## Recommendation
 

@@ -127,9 +127,11 @@ module Mailmate
               type: "string",
               description: "Account, mailbox path, or smart-mailbox name. Default: all.",
             },
-            limit: { type: "integer", description: "Stop after N matches." },
+            limit: { type: "integer", description: "Return at most N rows — the top N by limit_by (default: the N newest), taken after the full scan. Truncation is announced on stderr, which is included in the result." },
+            limit_by: { type: "string", description: "Which rows limit keeps: KEY[:asc|desc], KEY any output field (bare date/time = desc, text keys = asc). Default: date:desc (the N newest)." },
+            scan_limit: { type: "integer", description: "Stop SCANNING after N matches, in undefined order — a speed bound for slow body scans, never a way to pick rows. Prefer limit." },
             headers_only: { type: "boolean", description: "Skip body matching (much faster on text searches)." },
-            sort: { type: "string", enum: %w[asc desc none], description: "Sort by date+time. Default: asc." },
+            sort: { type: "string", description: "Order of the emitted rows: asc|desc|none (by date), or KEY[:asc|desc] for any output field, e.g. from, subject:desc. Ties break newest-first. Default: asc (date)." },
             european: { type: "boolean", description: "Slash dates in the query are day-first (d 9/8/2026 = Aug 9). Default: month-first American." },
           },
           additionalProperties: false,
@@ -428,7 +430,9 @@ module Mailmate
     def call_search(args)
       argv = []
       argv.push("--mailbox", args["mailbox"].to_s)   if args["mailbox"]
-      argv.push("--limit",   args["limit"].to_i.to_s) if args["limit"]
+      argv.push("--limit",      args["limit"].to_i.to_s)      if args["limit"]
+      argv.push("--limit-by",   args["limit_by"].to_s)        if args["limit_by"]
+      argv.push("--scan-limit", args["scan_limit"].to_i.to_s) if args["scan_limit"]
       argv.push("--headers-only")                    if args["headers_only"]
       argv.push("--sort",    args["sort"].to_s)      if args["sort"]
       argv.push("--european")                        if args["european"]

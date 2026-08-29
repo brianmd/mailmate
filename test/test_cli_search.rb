@@ -953,3 +953,177 @@ class TestCliSearch < Minitest::Test
     assert S.prefilter_pass?("/nonexistent.eml", [])
   end
 end
+
+# ---- --limit / --limit-by / --sort / --scan-limit -----------------------------
+#
+# `--limit` is a result cap taken AFTER the full scan (the N newest by
+# default); `--scan-limit` is the old early-exit. Fixture: a tmpdir IMAP tree
+# of 30 messages whose #date runs OPPOSITE to eml-id order, served through a
+# fake #date reader, so "the N newest" is distinguishable from "the first N
+# scanned" whatever order readdir happens to use.
+class TestCliSearchLimitAndSort < Minitest::Test
+  include Mailmate::TestHelpers
+
+  S = Mailmate::CLI::Search
+
+  FakeValueReader = Struct.new(:table) do
+    def value_for(id) = table[id]
+  end
+
+  # id 1 is the NEWEST message; senders cycle alice/bob/carol by id % 3 so a
+  # from-sort has ties to break.
+  def with_limit_fixture(count: 30)
+    Dir.mktmpdir do |dir|
+      msgs = File.join(dir, "Messages.noindex", "IMAP", "acct", "INBOX.mailbox", "Messages")
+      FileUtils.mkdir_p(msgs)
+      dates = {}
+      froms = {}
+      (1..count).each do |id|
+        t = Time.utc(2026, 1, 1, 12, 0, 0) - (id * 86_400)
+        dates[id] = t.strftime("%Y-%m-%d %H:%M:%S +0000")
+        froms[id] = "#{%w[carol alice bob][id % 3]}@example.com"
+        File.write(File.join(msgs, "#{id}.eml"),
+                   "From: #{froms[id]}\nTo: me@x\nSubject: s#{id}\nDate: #{t.rfc2822}\n\nbody\n")
+      end
+      readers = { "#date" => FakeValueReader.new(dates), "from" => FakeValueReader.new(froms) }
+      with_config(env: { "MAILMATE_APP_SUPPORT_DIR" => dir, "MAILMATE_DISPLAY_TIMEZONE" => "+00:00" }) do
+        S.stub(:reader_for, ->(name) { readers[name] }) { yield }
+      end
+    end
+  end
+
+  # Runs mmsearch with filtering disabled; returns [stdout rows, stderr].
+  def run_search(fields, *argv)
+    code = nil
+    out, err = capture_io { code = S.run(["", fields, *argv, "--no-header", "--no-align"]) }
+    assert_equal 0, code, err
+    [out.lines.map(&:chomp), err]
+  end
+
+  def ids_of(rows) = rows.map { |r| r.split(",").first.to_i }
+
+  # ---- parse_order ----
+
+  def test_parse_order_bare_direction_means_date
+    assert_equal({ key: "date", dir: :asc },  S.parse_order("asc"))
+    assert_equal({ key: "date", dir: :desc }, S.parse_order("desc"))
+    assert_equal :none, S.parse_order("none", allow_none: true)
+  end
+
+  def test_parse_order_bare_key_direction_follows_the_key
+    assert_equal({ key: "from", dir: :asc },     S.parse_order("from"))
+    assert_equal({ key: "date", dir: :desc },    S.parse_order("date"))
+    assert_equal({ key: "time", dir: :desc },    S.parse_order("time"))
+    assert_equal({ key: "subject", dir: :desc }, S.parse_order("subject:desc"))
+    assert_equal({ key: "date", dir: :asc },     S.parse_order("date:asc"))
+  end
+
+  def test_parse_order_rejects_unknown_key_and_direction
+    assert_raises(OptionParser::InvalidArgument) { S.parse_order("bogus") }
+    assert_raises(OptionParser::InvalidArgument) { S.parse_order("from:sideways") }
+    assert_raises(OptionParser::InvalidArgument) { S.parse_order("none") } # --limit-by has no none
+  end
+
+  def test_run_reports_a_bad_sort_as_a_usage_error_not_a_crash
+    code = nil
+    _, err = capture_io { code = S.run(["", "--sort", "bogus"]) }
+    assert_equal 2, code
+    assert_includes err, "--sort bogus"
+    assert_includes err, "unknown field"
+  end
+
+  # ---- --limit ----
+
+  def test_limit_keeps_the_n_newest_regardless_of_scan_order
+    with_limit_fixture do
+      rows, err = run_search("id date", "--limit", "10")
+      ids = ids_of(rows)
+      assert_equal (1..10).to_a, ids.sort, "the ten newest survive, whatever order they were scanned in"
+      assert_equal (1..10).to_a.reverse, ids, "default --sort date:asc shows the survivors oldest-first"
+      assert_includes err, "[limit] showing 10 of 30 matches (newest first by date)"
+      refute_match(/\[limit\]/, rows.join("\n"), "the notice must never reach stdout")
+    end
+  end
+
+  def test_limit_at_or_above_the_match_count_is_silent
+    with_limit_fixture do
+      rows, err = run_search("id", "--limit", "30")
+      assert_equal 30, rows.size
+      assert_empty err
+    end
+  end
+
+  def test_limit_by_date_asc_keeps_the_n_oldest
+    with_limit_fixture do
+      rows, err = run_search("id", "--limit", "10", "--limit-by", "date:asc")
+      assert_equal (21..30).to_a.reverse, ids_of(rows)
+      assert_includes err, "(oldest first by date)"
+    end
+  end
+
+  # ---- --sort ----
+
+  def test_bare_sort_desc_still_means_date_desc
+    with_limit_fixture do
+      rows, _ = run_search("id", "--limit", "10", "--sort", "desc")
+      assert_equal (1..10).to_a, ids_of(rows)
+      rows, _ = run_search("id", "--limit", "10", "--sort", "date")
+      assert_equal (1..10).to_a, ids_of(rows), "a bare date key reads newest-first"
+    end
+  end
+
+  def test_sort_by_from_orders_the_newest_n_by_sender_then_newest_first
+    with_limit_fixture do
+      # ids 1..9 survive; alice = 1,4,7  bob = 2,5,8  carol = 3,6,9; within a
+      # sender the newest (lowest id) comes first, in both directions.
+      rows, _ = run_search("id from", "--limit", "9", "--sort", "from")
+      assert_equal [1, 4, 7, 2, 5, 8, 3, 6, 9], ids_of(rows)
+      rows, _ = run_search("id from", "--limit", "9", "--sort", "from:desc")
+      assert_equal [3, 6, 9, 2, 5, 8, 1, 4, 7], ids_of(rows)
+    end
+  end
+
+  def test_sort_key_that_is_not_an_output_column_is_extracted_for_the_sort
+    with_limit_fixture do
+      rows, _ = run_search("id", "--limit", "9", "--sort", "from")
+      assert_equal [1, 4, 7, 2, 5, 8, 3, 6, 9], ids_of(rows)
+      assert_equal ["1"], rows.first.split(","), "the hidden key is not emitted"
+    end
+  end
+
+  def test_sort_works_when_id_is_not_an_output_column
+    with_limit_fixture do
+      rows, _ = run_search("date from", "--limit", "3", "--sort", "desc")
+      assert_equal ["2025-12-31,alice@example.com", "2025-12-30,bob@example.com", "2025-12-29,carol@example.com"], rows
+    end
+  end
+
+  def test_sort_none_with_limit_emits_the_survivors_in_scan_order
+    with_limit_fixture do
+      all, _ = run_search("id", "--sort", "none")
+      rows, _ = run_search("id", "--limit", "10", "--sort", "none")
+      assert_equal (1..10).to_a, ids_of(rows).sort
+      assert_equal ids_of(all).select { |i| i <= 10 }, ids_of(rows)
+    end
+  end
+
+  # ---- --scan-limit ----
+
+  def test_scan_limit_stops_early_and_says_it_is_a_sample
+    with_limit_fixture do
+      rows, err = run_search("id", "--scan-limit", "5")
+      assert_equal 5, rows.size
+      assert_includes err, "[scan-limit] stopped scanning after 5 matches"
+      assert_includes err, "not the newest 5"
+    end
+  end
+
+  def test_scan_cap_silences_the_limit_notice_since_the_total_is_a_sample
+    with_limit_fixture do
+      rows, err = run_search("id", "--scan-limit", "5", "--limit", "3")
+      assert_equal 3, rows.size
+      assert_includes err, "[scan-limit]"
+      refute_includes err, "[limit]"
+    end
+  end
+end

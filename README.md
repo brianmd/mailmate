@@ -169,8 +169,11 @@ mmsearch 's "invoice due" !draft'
 # Received in May 2026
 mmsearch 'd 2026-05'
 
-# Custom columns + cap results + raw CSV (no padding)
+# Custom columns + the 20 newest + raw CSV (no padding)
 mmsearch 'f acme' 'id flags subject from' --limit 20 --no-align
+
+# The 10 newest from acme, listed by sender (not the 10 alphabetically-first senders)
+mmsearch 'f acme' --limit 10 --sort from
 ```
 
 **Quicksearch syntax.** The search-string is a list of specs combined with **AND**; a bare `or` separates alternatives, and AND binds tighter (no parens — write `(f bob or f ann) s invoice` out as `f bob s invoice or f ann s invoice`). After `or`, a bare first term inherits the modifier in force: `d 2024 or 2025 or 2y`. Wrap multi-word terms in `"double quotes"` (also how to search for the literal word "or"). `mmsearch --help` is the canonical, always-current rendering of this table.
@@ -196,7 +199,9 @@ Dates match on the **display-zone day** — the same day the `date`/`time` outpu
 
 The `--mailbox` argument accepts an account, an `account/path`, a bare mailbox name matched across accounts, or a **smart-mailbox name** (e.g. `Newsletters`, `Receipts`, `Priority`) whose filter is ANDed into the search.
 
-**Output fields.** Default columns are `flags date time direction party subject`. Prefix a field list with `+` to add to the defaults; a bare list replaces them (`id` is always the first column).
+**Output fields.** Default columns are `flags date time direction party subject`. Prefix a field list with `+` to add to the defaults; a bare list replaces them (include `id` yourself if you want it).
+
+**Limiting and ordering.** `--limit N` returns the N *newest* matches, chosen after the full scan; `--limit-by KEY[:asc|desc]` changes which rows survive (`date:asc` = the N oldest). `--sort KEY[:asc|desc]` orders the emitted rows independently, so `--limit 10 --sort from` is the ten newest shown by sender. Bare `--sort asc|desc|none` still means date; a bare key reads the way the key does (date/time newest-first, text A→Z); ties break newest-first. A truncated result says so on stderr (`[limit] showing 200 of 319 matches …`) so stdout stays clean CSV. `--scan-limit N` is a different thing: it stops the *scan* after N matches in undefined order — a speed bound for slow `--all` body scans, never a way to pick rows. (Before 2.0, `--limit` had those scan-cap semantics: N arbitrary matches, however sorted.)
 
 | Field | What it shows |
 |---|---|

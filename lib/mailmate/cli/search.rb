@@ -38,6 +38,27 @@ module Mailmate
         "archive"   => "a",
       }.freeze
 
+      # One matched message on its way to the output. `cells` are the
+      # extracted output columns in `fields` order; `keys` holds the values
+      # of any sort/limit key that is NOT an output column (extracted while
+      # the message was live, so ordering never re-reads a .eml); `instant`
+      # is the absolute send time (nil when unknown); `index` is scan order,
+      # the last-resort tie-break. Ordering keys off these, never off the
+      # cells — a bare fields list may omit `id`, and the old
+      # `rows[0].to_i` shortcut silently sorted such runs by readdir order.
+      Row = Struct.new(:eml_id, :index, :instant, :cells, :keys) do
+        def instant_or_epoch = instant || Time.at(0)
+      end
+
+      # `--sort` / `--limit-by` values: `{ key: <field>, dir: :asc|:desc }`,
+      # or :none (sort only). Omitted `--sort` keeps the historical
+      # date-ascending output; omitted `--limit-by` keeps the N newest.
+      DEFAULT_SORT     = { key: "date", dir: :asc }.freeze
+      DEFAULT_LIMIT_BY = { key: "date", dir: :desc }.freeze
+      # A bare KEY (no :DIR) reads the way the key does: dates newest-first,
+      # text A→Z.
+      DESC_BY_DEFAULT = %w[date time].freeze
+
       # All output fields are now index-tier: MailMate maintains a per-header
       # binary index under Database.noindex/Headers/, so extracting from/to/
       # subject/etc. doesn't require opening the .eml. Spec/filter matching
@@ -63,13 +84,19 @@ module Mailmate
 
       def run(argv)
         opts = {
-          mailbox: "all", limit: nil, headers_only: false, all: false,
+          mailbox: "all", limit: nil, scan_limit: nil, limit_by: DEFAULT_LIMIT_BY,
+          headers_only: false, all: false,
           exclude_quoted: false,
-          header: true, align: true, sort: :asc,
+          header: true, align: true, sort: DEFAULT_SORT,
         }
 
         parser = build_parser(opts)
-        parser.parse!(argv)
+        begin
+          parser.parse!(argv)
+        rescue OptionParser::ParseError => e
+          warn e.message
+          return 2
+        end
 
         self.date_order = opts[:european] ? :dmy : :mdy
 
@@ -163,8 +190,24 @@ module Mailmate
           opts: opts,
         )
 
-        sort_rows!(rows, opts[:sort])
-        emit_output(rows, fields, opts)
+        # The scan stops exactly at --scan-limit, so hitting it is inferable.
+        scan_capped = opts[:scan_limit] && rows.size >= opts[:scan_limit]
+        total = rows.size
+        rows = apply_limit(rows, opts[:limit], opts[:limit_by], fields)
+        sort_rows!(rows, opts[:sort], fields)
+        emit_output(rows.map(&:cells), fields, opts)
+        # Truncation announces itself on stderr — same idiom as the
+        # zero-result hint below: stdout stays clean CSV, exit status stays
+        # 0. When the scan cap fired, the match total is itself a sample, so
+        # the [limit] notice's "of M" would be false precision; the scan
+        # notice speaks alone.
+        if scan_capped
+          warn "[scan-limit] stopped scanning after #{total} matches in undefined order — " \
+               "this is a sample, not the newest #{total}"
+        elsif opts[:limit] && total > opts[:limit]
+          warn "[limit] showing #{opts[:limit]} of #{total} matches (#{describe_order(opts[:limit_by])}); " \
+               "add a date term such as `d 3d` to narrow, or raise --limit"
+        end
         # A query written in another mail system's dialect is not a syntax
         # error here — it parses as a literal term and quietly matches
         # nothing. Callers (people and agents alike) read that empty result
@@ -177,22 +220,84 @@ module Mailmate
         0
       end
 
-      # ---- sort ---------------------------------------------------------------
+      # ---- ordering -----------------------------------------------------------
+      #
+      # Two orderings, two questions. `--limit-by` answers WHICH rows survive
+      # the cap (the N newest, by default); `--sort` answers the ORDER they
+      # are emitted in. They coincide when both are date — the default — and
+      # diverge exactly when MailMate's UI would: "sort by sender, limit 10"
+      # is the 10 newest shown by sender, not the 10 alphabetically-first
+      # senders. Both are applied AFTER the full scan; the only pre-scan
+      # bound is --scan-limit, which picks nothing (see build_parser).
 
-      # Sorts `rows` in place by the message's absolute send instant (UTC), so
-      # senders in different timezones still order correctly. The first column
-      # is always `id` (forced in `run`), which lets us hit the `#date` index
-      # without re-reading any .eml.
-      def sort_rows!(rows, mode)
-        return rows if mode == :none || rows.size < 2
-        reader = Mailmate::IndexReader.for("#date") rescue nil
-        epoch = Time.at(0)
-        rows.sort_by! do |r|
-          s = reader && (reader.value_for(r[0].to_i) rescue nil)
-          (s && !s.empty? && (fast_time(s) || (Time.parse(s) rescue nil))) || epoch
+      # Parses a `--sort`/`--limit-by` value: bare `asc`/`desc` (date, kept
+      # for existing invocations), `none` (sort only), `KEY`, or `KEY:DIR`.
+      def parse_order(value, allow_none: false)
+        v = value.to_s.strip
+        return :none if v == "none" && allow_none
+        return { key: "date", dir: v.to_sym } if %w[asc desc].include?(v)
+        key, dir = v.split(":", 2)
+        key = "date" if key.nil? || key.empty?
+        unless VALID_FIELDS.include?(key)
+          raise OptionParser::InvalidArgument,
+                "#{value}: unknown field '#{key}' (valid: #{VALID_FIELDS.join(' ')})"
         end
-        rows.reverse! if mode == :desc
-        rows
+        dir = (DESC_BY_DEFAULT.include?(key) ? "desc" : "asc") if dir.nil? || dir.empty?
+        unless %w[asc desc].include?(dir)
+          raise OptionParser::InvalidArgument,
+                "#{value}: direction must be asc or desc#{allow_none ? ' (or bare none)' : ''}"
+        end
+        { key: key, dir: dir.to_sym }
+      end
+
+      def describe_order(order)
+        return "scan order" if order == :none
+        what = order[:key] == "date" ? (order[:dir] == :desc ? "newest first" : "oldest first")
+                                     : "#{order[:key]} #{order[:dir] == :desc ? 'descending' : 'ascending'}"
+        "#{what} by #{order[:key]}"
+      end
+
+      # The sort key value for one row. `date` is the absolute send instant
+      # (so senders in different timezones still order correctly), `id` is
+      # numeric, everything else is the column text, case-folded.
+      def order_value(row, key, column)
+        case key
+        when "date" then row.instant_or_epoch
+        when "id"   then row.eml_id.to_i
+        else (column ? row.cells[column] : row.keys[key]).to_s.downcase
+        end
+      end
+
+      # Orders `rows` in place by `order` (`{key:, dir:}`), breaking ties
+      # newest-first and then by scan order — so "sorted by sender" lists each
+      # sender's mail newest-first, deterministically. Ruby's sort is not
+      # stable, and stable-over-readdir would only preserve the undefined
+      # order this exists to get rid of.
+      def order_rows!(rows, order, fields)
+        return rows.sort_by!(&:index) if order == :none
+        return rows if rows.size < 2
+        key, sign = order[:key], (order[:dir] == :desc ? -1 : 1)
+        column = fields.index(key)
+        rows.sort! do |a, b|
+          c = (order_value(a, key, column) <=> order_value(b, key, column)) || 0
+          c *= sign
+          c = b.instant_or_epoch <=> a.instant_or_epoch if c.zero? && key != "date"
+          c = a.index <=> b.index if c.zero?
+          c
+        end
+      end
+
+      # Keeps the top `limit` rows by `limit_by`, taken over the FULL match
+      # set. Returns the same array when no cap applies. Rows come back in
+      # limit-by order; `sort_rows!` re-orders them for output.
+      def apply_limit(rows, limit, limit_by, fields)
+        return rows if limit.nil? || rows.size <= limit
+        order_rows!(rows, limit_by, fields)
+        rows.first(limit)
+      end
+
+      def sort_rows!(rows, order, fields)
+        order_rows!(rows, order, fields)
       end
 
       # ---- option parsing -----------------------------------------------------
@@ -213,14 +318,19 @@ module Mailmate
           o.separator "OPTIONS"
           o.on("--mailbox X", "Mailbox to search (default: all)") { |v| opts[:mailbox] = v }
           o.on("--fields F", "Fields list (alt to 2nd positional)") { |v| opts[:fields] = v }
-          o.on("--limit N", Integer, "Stop after N matches") { |n| opts[:limit] = n }
+          o.on("--limit N", Integer,
+               "Return at most N rows: the top N by --limit-by (default: the N newest), taken after the full scan. Announces truncation on stderr.") { |n| opts[:limit] = n }
+          o.on("--limit-by KEY[:DIR]",
+               "Which rows --limit keeps. KEY is any output field; DIR is asc|desc (bare date/time = desc, text keys = asc). Default: date:desc") { |v| opts[:limit_by] = parse_order(v) }
+          o.on("--scan-limit N", Integer,
+               "Stop SCANNING after N matches, in undefined order — a speed bound for slow --all body scans, never a way to pick rows. Announces on stderr.") { |n| opts[:scan_limit] = n }
           o.on("--headers-only", "Skip body matching entirely") { opts[:headers_only] = true }
           o.on("--all", "Include un-indexed messages in body matching by lazily reading and parsing each .eml. Slow (tens of seconds to minutes on large archives). Default behavior matches MailMate's UI: only check messages MailMate has body-indexed — fast, but bounded.") { opts[:all] = true }
           o.on("--exclude-quoted", "Match body only against #unquoted text — skip MailMate's #quoted index (forwarded/replied-to text). Tightens search to fresh content; gets you closer to MailMate UI's body-search result set, at the cost of missing hits in quoted sections.") { opts[:exclude_quoted] = true }
           o.on("--no-header", "Suppress column header row") { opts[:header] = false }
           o.on("--no-align", "Plain CSV (no column padding)") { opts[:align] = false }
-          o.on("--sort MODE", %w[asc desc none],
-               "Sort rows by date+time: asc (default), desc, none") { |v| opts[:sort] = v.to_sym }
+          o.on("--sort KEY[:DIR]",
+               "Order of the emitted rows. asc|desc|none alone mean date; or any output field, e.g. from, subject:desc (bare date/time = desc, text keys = asc). Ties break newest-first. Default: date:asc") { |v| opts[:sort] = parse_order(v, allow_none: true) }
           o.on("--european",
                "Slash dates are day-first: d 9/8/2026 = Aug 9 (default: month-first American)") { opts[:european] = true }
           o.separator ""
@@ -1166,7 +1276,7 @@ module Mailmate
       # Absolute send time for an eml_id, preferring the MailMate `#date` index
       # (cheap, no .eml read). Falls back to the parsed mail's Date header.
       def message_time(eml_id, mail)
-        s = (Mailmate::IndexReader.for("#date").value_for(eml_id.to_i) rescue nil)
+        s = (reader_for("#date")&.value_for(eml_id.to_i) rescue nil)
         if s && !s.empty?
           t = fast_time(s) || (Time.parse(s) rescue nil)
           return t if t
@@ -1191,7 +1301,7 @@ module Mailmate
       # safely interleave with UTF-8 strings in joined output rows.
       def header_index_value(eml_id, name)
         return nil if eml_id.nil?
-        v = Mailmate::IndexReader.for(name).value_for(eml_id.to_i)
+        v = reader_for(name)&.value_for(eml_id.to_i)
         v && v.dup.force_encoding("UTF-8").scrub
       rescue ArgumentError
         nil
@@ -1314,6 +1424,11 @@ module Mailmate
 
       def collect_rows(dirs:, specs:, fields:, smart_evaluator:, smart_literals:, filter_only_tier:, load_tier:, opts:)
         reset_run_caches!
+        # Sort/limit keys that are not output columns are extracted here,
+        # while the message is live, and ride along in Row#keys. `date` and
+        # `id` never need extracting: every row carries instant + eml_id.
+        extra_keys = [opts[:sort], opts[:limit_by]].grep(Hash).map { |o| o[:key] } - fields - %w[date id]
+        need_instant = opts[:sort] != :none || !opts[:limit].nil?
         rows = []
         catch(:done) do
           dirs.each do |dir|
@@ -1354,8 +1469,10 @@ module Mailmate
                 end
               end
 
-              rows << fields.map { |f| extract(f, eml_id, path, mail) }
-              throw :done if opts[:limit] && rows.size >= opts[:limit]
+              cells = fields.map { |f| extract(f, eml_id, path, mail) }
+              keys  = extra_keys.to_h { |k| [k, extract(k, eml_id, path, mail)] }
+              rows << Row.new(eml_id, rows.size, need_instant ? message_time(eml_id, mail) : nil, cells, keys)
+              throw :done if opts[:scan_limit] && rows.size >= opts[:scan_limit]
             end
           end
         end

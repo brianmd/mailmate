@@ -219,3 +219,30 @@ class TestMCP < Minitest::Test
     assert_nil S.send(:recipient_check, { "forward" => "42", "to" => "new@example.com" })
   end
 end
+
+class TestMcpSearchLimitAndSort < Minitest::Test
+  S = Mailmate::MCP
+
+  def test_call_search_maps_limit_by_scan_limit_and_key_sorts_onto_the_cli
+    seen = nil
+    Mailmate::CLI::Search.stub(:run, ->(argv) { seen = argv; 0 }) do
+      S.dispatch("search", "query" => "f bob", "limit" => 10, "limit_by" => "date:asc",
+                           "scan_limit" => 500, "sort" => "from:desc")
+    end
+    assert_equal ["--limit", "10", "--limit-by", "date:asc", "--scan-limit", "500",
+                  "--sort", "from:desc", "f bob"], seen
+  end
+
+  def test_call_search_passes_the_truncation_notice_through_on_success
+    fake = lambda do |_argv|
+      puts "id,date\n1,2026-01-01"
+      warn "[limit] showing 1 of 2 matches (newest first by date)"
+      0
+    end
+    res = Mailmate::CLI::Search.stub(:run, fake) { S.dispatch("search", "query" => "x", "limit" => 1) }
+    text = res[:content].first[:text]
+    refute res[:isError]
+    assert_includes text, "1,2026-01-01"
+    assert_includes text, "[stderr]\n[limit] showing 1 of 2 matches"
+  end
+end

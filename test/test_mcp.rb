@@ -230,7 +230,7 @@ class TestMcpSearchLimitAndSort < Minitest::Test
                            "scan_limit" => 500, "sort" => "from:desc")
     end
     assert_equal ["--limit", "10", "--limit-by", "date:asc", "--scan-limit", "500",
-                  "--sort", "from:desc", "f bob"], seen
+                  "--sort", "from:desc", "--stats", "f bob"], seen
   end
 
   def test_call_search_passes_the_truncation_notice_through_on_success
@@ -244,5 +244,31 @@ class TestMcpSearchLimitAndSort < Minitest::Test
     refute res[:isError]
     assert_includes text, "1,2026-01-01"
     assert_includes text, "[stderr]\n[limit] showing 1 of 2 matches"
+  end
+
+  def test_call_search_maps_offset_and_always_asks_for_stats
+    seen = nil
+    Mailmate::CLI::Search.stub(:run, ->(argv) { seen = argv; 0 }) do
+      S.dispatch("search", "query" => "x", "limit" => 200, "offset" => 1000)
+    end
+    assert_equal ["--limit", "200", "--offset", "1000", "--stats", "x"], seen
+  end
+
+  def test_call_search_surfaces_the_stats_line_as_structured_content
+    fake = lambda do |_argv|
+      warn 'stats: {"schema":1,"matches":321,"returned":3,"scan_capped":false}'
+      puts "id\n1"
+      0
+    end
+    res = Mailmate::CLI::Search.stub(:run, fake) { S.dispatch("search", "query" => "x") }
+    assert_equal 321, res[:structuredContent][:stats]["matches"]
+    assert_includes res[:content].first[:text], "stats: {", "the line stays readable in the text too"
+  end
+
+  def test_call_search_leaves_a_malformed_stats_line_as_text
+    fake = ->(_argv) { warn "stats: {not json"; puts "id\n1"; 0 }
+    res = Mailmate::CLI::Search.stub(:run, fake) { S.dispatch("search", "query" => "x") }
+    refute res.key?(:structuredContent)
+    assert_includes res[:content].first[:text], "stats: {not json"
   end
 end

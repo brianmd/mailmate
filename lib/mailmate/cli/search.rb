@@ -4,6 +4,8 @@ require "mail"
 require "optparse"
 require "date"
 require "csv"
+require "json"
+require "stringio"
 
 module Mailmate
   module CLI
@@ -84,10 +86,10 @@ module Mailmate
 
       def run(argv)
         opts = {
-          mailbox: "all", limit: nil, scan_limit: nil, limit_by: DEFAULT_LIMIT_BY,
+          mailbox: "all", limit: nil, offset: 0, scan_limit: nil, limit_by: DEFAULT_LIMIT_BY,
           headers_only: false, all: false,
           exclude_quoted: false,
-          header: true, align: true, sort: DEFAULT_SORT,
+          header: true, align: true, sort: DEFAULT_SORT, stats: false,
         }
 
         parser = build_parser(opts)
@@ -98,14 +100,43 @@ module Mailmate
           return 2
         end
 
+        return search(argv, opts) unless opts[:stats]
+
+        # --stats promises one machine-readable line FIRST on stderr, but
+        # the run says other things there before the total is known (the
+        # translation notice, dead-branch warnings, [skip]s). Hold all of it
+        # back and release it, in order, after the stats line. A run that
+        # never reached the scan (usage error) produces no stats line — the
+        # held output is still released, so nothing is swallowed.
+        held = StringIO.new
+        real_err = $stderr
+        $stderr = held
+        begin
+          search(argv, opts)
+        ensure
+          $stderr = real_err
+          $stderr.puts "#{STATS_PREFIX}#{JSON.generate(opts[:stats_result])}" if opts[:stats_result]
+          $stderr.print held.string
+        end
+      end
+
+      # The `--stats` contract: this prefix, then one JSON object, on the
+      # first stderr line. `matches`, `returned` and `scan_capped` are always
+      # present; keys are additive-only, and `schema` increments only on a
+      # change that breaks that promise. Consumers (markdownr's search_mail,
+      # mailmate-mcp) parse this instead of the prose notices.
+      STATS_PREFIX = "stats: "
+      STATS_SCHEMA = 1
+
+      def search(argv, opts)
         self.date_order = opts[:european] ? :dmy : :mdy
 
-        search_string = argv[0] || DEFAULT_SEARCH
+        query = argv[0] || DEFAULT_SEARCH
         # Rewrite Gmail/Outlook-style key:value tokens to their exact
         # quicksearch equivalent — loudly, never silently: every rewrite is
         # announced on stderr so the transcript shows what actually ran (and
         # the caller learns the syntax). stdout stays clean CSV.
-        search_string, translations = Mailmate::SearchSyntax.translate(search_string, european: !!opts[:european])
+        search_string, translations = Mailmate::SearchSyntax.translate(query, european: !!opts[:european])
         if (notice = Mailmate::SearchSyntax.translation_notice(translations))
           warn notice
         end
@@ -193,19 +224,29 @@ module Mailmate
         # The scan stops exactly at --scan-limit, so hitting it is inferable.
         scan_capped = opts[:scan_limit] && rows.size >= opts[:scan_limit]
         total = rows.size
-        rows = apply_limit(rows, opts[:limit], opts[:limit_by], fields)
+        rows = apply_limit(rows, opts[:limit], opts[:offset], opts[:limit_by], fields)
         sort_rows!(rows, opts[:sort], fields)
         emit_output(rows.map(&:cells), fields, opts)
         # Truncation announces itself on stderr — same idiom as the
         # zero-result hint below: stdout stays clean CSV, exit status stays
-        # 0. When the scan cap fired, the match total is itself a sample, so
-        # the [limit] notice's "of M" would be false precision; the scan
-        # notice speaks alone.
-        if scan_capped
+        # 0. With --stats the JSON line carries it and the prose is
+        # suppressed. When the scan cap fired, the match total is itself a
+        # sample, so the [limit] notice's "of M" would be false precision;
+        # the scan notice speaks alone.
+        if opts[:stats]
+          opts[:stats_result] = {
+            schema: STATS_SCHEMA, matches: total, returned: rows.size,
+            limit: opts[:limit], offset: opts[:offset],
+            limit_by: order_to_s(opts[:limit_by]), sort: order_to_s(opts[:sort]),
+            scan_limit: opts[:scan_limit], scan_capped: !!scan_capped,
+            query: query, effective_query: search_string,
+          }
+        elsif scan_capped
           warn "[scan-limit] stopped scanning after #{total} matches in undefined order — " \
                "this is a sample, not the newest #{total}"
-        elsif opts[:limit] && total > opts[:limit]
-          warn "[limit] showing #{opts[:limit]} of #{total} matches (#{describe_order(opts[:limit_by])}); " \
+        elsif rows.size < total
+          from = opts[:offset].positive? ? ", from #{opts[:offset] + 1}" : ""
+          warn "[limit] showing #{rows.size} of #{total} matches#{from} (#{describe_order(opts[:limit_by])}); " \
                "add a date term such as `d 3d` to narrow, or raise --limit"
         end
         # A query written in another mail system's dialect is not a syntax
@@ -213,8 +254,10 @@ module Mailmate
         # nothing. Callers (people and agents alike) read that empty result
         # as "no such mail" and stop. Say so on stderr, so stdout stays
         # clean CSV and the exit status stays 0: the search DID run, it just
-        # cannot have found what the caller meant.
-        if rows.empty? && (hint = Mailmate::SearchSyntax.zero_result_hint(search_string))
+        # cannot have found what the caller meant. (Keyed on the match
+        # total, not the emitted rows: an --offset past the end is not a
+        # miss.)
+        if total.zero? && (hint = Mailmate::SearchSyntax.zero_result_hint(search_string))
           warn hint
         end
         0
@@ -250,6 +293,10 @@ module Mailmate
         { key: key, dir: dir.to_sym }
       end
 
+      def order_to_s(order)
+        order == :none ? "none" : "#{order[:key]}:#{order[:dir]}"
+      end
+
       def describe_order(order)
         return "scan order" if order == :none
         what = order[:key] == "date" ? (order[:dir] == :desc ? "newest first" : "oldest first")
@@ -268,32 +315,37 @@ module Mailmate
         end
       end
 
-      # Orders `rows` in place by `order` (`{key:, dir:}`), breaking ties
-      # newest-first and then by scan order — so "sorted by sender" lists each
-      # sender's mail newest-first, deterministically. Ruby's sort is not
-      # stable, and stable-over-readdir would only preserve the undefined
-      # order this exists to get rid of.
+      # Orders `rows` in place by `order` (`{key:, dir:}`). The order is
+      # TOTAL: ties break newest-first, then by eml-id (in the date's
+      # direction when date is the key, else newest-first) — so "sorted by
+      # sender" lists each sender's mail newest-first, and two runs of the
+      # same query page identically (`--offset` depends on that). Ruby's
+      # sort is not stable, and stable-over-readdir would only preserve the
+      # undefined order this exists to get rid of.
       def order_rows!(rows, order, fields)
         return rows.sort_by!(&:index) if order == :none
         return rows if rows.size < 2
         key, sign = order[:key], (order[:dir] == :desc ? -1 : 1)
+        id_sign = key == "date" ? sign : -1
         column = fields.index(key)
         rows.sort! do |a, b|
           c = (order_value(a, key, column) <=> order_value(b, key, column)) || 0
           c *= sign
           c = b.instant_or_epoch <=> a.instant_or_epoch if c.zero? && key != "date"
-          c = a.index <=> b.index if c.zero?
+          c = (a.eml_id.to_i <=> b.eml_id.to_i) * id_sign if c.zero?
           c
         end
       end
 
-      # Keeps the top `limit` rows by `limit_by`, taken over the FULL match
-      # set. Returns the same array when no cap applies. Rows come back in
-      # limit-by order; `sort_rows!` re-orders them for output.
-      def apply_limit(rows, limit, limit_by, fields)
-        return rows if limit.nil? || rows.size <= limit
+      # Keeps rows `offset` through `offset + limit` of the `limit_by`
+      # ordering, taken over the FULL match set. Returns the same array when
+      # no cap applies. Rows come back in limit-by order; `sort_rows!`
+      # re-orders them for output.
+      def apply_limit(rows, limit, offset, limit_by, fields)
+        return rows if offset.zero? && (limit.nil? || rows.size <= limit)
         order_rows!(rows, limit_by, fields)
-        rows.first(limit)
+        window = rows.drop(offset)
+        limit ? window.first(limit) : window
       end
 
       def sort_rows!(rows, order, fields)
@@ -322,6 +374,11 @@ module Mailmate
                "Return at most N rows: the top N by --limit-by (default: the N newest), taken after the full scan. Announces truncation on stderr.") { |n| opts[:limit] = n }
           o.on("--limit-by KEY[:DIR]",
                "Which rows --limit keeps. KEY is any output field; DIR is asc|desc (bare date/time = desc, text keys = asc). Default: date:desc") { |v| opts[:limit_by] = parse_order(v) }
+          o.on("--offset N", Integer,
+               "Skip the first N rows of the --limit-by ordering before taking --limit: rows 1001-1200 newest-first is --offset 1000 --limit 200. Pages of a live mailbox drift as mail arrives; a date term (d <2026-08-25) is the stable way to page.") { |n|
+            raise OptionParser::InvalidArgument, "#{n}: offset cannot be negative" if n.negative?
+            opts[:offset] = n
+          }
           o.on("--scan-limit N", Integer,
                "Stop SCANNING after N matches, in undefined order — a speed bound for slow --all body scans, never a way to pick rows. Announces on stderr.") { |n| opts[:scan_limit] = n }
           o.on("--headers-only", "Skip body matching entirely") { opts[:headers_only] = true }
@@ -331,6 +388,8 @@ module Mailmate
           o.on("--no-align", "Plain CSV (no column padding)") { opts[:align] = false }
           o.on("--sort KEY[:DIR]",
                "Order of the emitted rows. asc|desc|none alone mean date; or any output field, e.g. from, subject:desc (bare date/time = desc, text keys = asc). Ties break newest-first. Default: date:asc") { |v| opts[:sort] = parse_order(v, allow_none: true) }
+          o.on("--stats",
+               "Write one machine-readable line FIRST on stderr — stats: {\"schema\":1,\"matches\":M,\"returned\":N,\"scan_capped\":false,...} — in place of the [limit]/[scan-limit] prose. Keys are additive-only; other stderr follows it.") { opts[:stats] = true }
           o.on("--european",
                "Slash dates are day-first: d 9/8/2026 = Aug 9 (default: month-first American)") { opts[:european] = true }
           o.separator ""
@@ -1428,7 +1487,7 @@ module Mailmate
         # while the message is live, and ride along in Row#keys. `date` and
         # `id` never need extracting: every row carries instant + eml_id.
         extra_keys = [opts[:sort], opts[:limit_by]].grep(Hash).map { |o| o[:key] } - fields - %w[date id]
-        need_instant = opts[:sort] != :none || !opts[:limit].nil?
+        need_instant = opts[:sort] != :none || !opts[:limit].nil? || opts[:offset].positive?
         rows = []
         catch(:done) do
           dirs.each do |dir|

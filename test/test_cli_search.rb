@@ -1,3 +1,4 @@
+require "json"
 # frozen_string_literal: true
 
 require_relative "test_helper"
@@ -979,7 +980,7 @@ class TestCliSearchLimitAndSort < Minitest::Test
       dates = {}
       froms = {}
       (1..count).each do |id|
-        t = Time.utc(2026, 1, 1, 12, 0, 0) - (id * 86_400)
+        t = Time.utc(2026, 1, 1, 12, 0, 0) - ((id == 16 ? 15 : id) * 86_400) # 15 and 16 tie
         dates[id] = t.strftime("%Y-%m-%d %H:%M:%S +0000")
         froms[id] = "#{%w[carol alice bob][id % 3]}@example.com"
         File.write(File.join(msgs, "#{id}.eml"),
@@ -992,10 +993,10 @@ class TestCliSearchLimitAndSort < Minitest::Test
     end
   end
 
-  # Runs mmsearch with filtering disabled; returns [stdout rows, stderr].
-  def run_search(fields, *argv)
+  # Runs mmsearch (filtering disabled unless `query:`); returns [stdout rows, stderr].
+  def run_search(fields, *argv, query: "")
     code = nil
-    out, err = capture_io { code = S.run(["", fields, *argv, "--no-header", "--no-align"]) }
+    out, err = capture_io { code = S.run([query, fields, *argv, "--no-header", "--no-align"]) }
     assert_equal 0, code, err
     [out.lines.map(&:chomp), err]
   end
@@ -1125,5 +1126,122 @@ class TestCliSearchLimitAndSort < Minitest::Test
       assert_includes err, "[scan-limit]"
       refute_includes err, "[limit]"
     end
+  end
+
+  # ---- --offset ----
+
+  def test_offset_pages_the_limit_by_ordering
+    with_limit_fixture do
+      rows, err = run_search("id", "--limit", "5", "--offset", "5", "--sort", "desc")
+      assert_equal [6, 7, 8, 9, 10], ids_of(rows)
+      assert_includes err, "[limit] showing 5 of 30 matches, from 6 (newest first by date)"
+    end
+  end
+
+  def test_offset_without_limit_skips_the_first_n
+    with_limit_fixture do
+      rows, _ = run_search("id", "--offset", "25", "--sort", "desc")
+      assert_equal [26, 27, 28, 29, 30], ids_of(rows)
+    end
+  end
+
+  def test_offset_past_the_end_is_empty_but_not_a_zero_result
+    with_limit_fixture do
+      rows, err = run_search("id", "--limit", "5", "--offset", "100")
+      assert_empty rows
+      assert_includes err, "[limit] showing 0 of 30 matches, from 101"
+      assert_equal 1, err.lines.size, "no zero-result hint: the search matched 30"
+    end
+  end
+
+  def test_pages_partition_because_date_ties_break_by_id
+    with_limit_fixture do
+      # ids 15 and 16 share a date. Newest-first the tie resolves 16 then
+      # 15 every run, so adjacent pages neither overlap nor skip.
+      a, _ = run_search("id", "--limit", "2", "--offset", "14", "--sort", "desc")
+      b, _ = run_search("id", "--limit", "2", "--offset", "16", "--sort", "desc")
+      assert_equal [16, 15], ids_of(a)
+      assert_equal [17, 18], ids_of(b)
+      # Oldest-first the same tie resolves the other way round.
+      old, _ = run_search("id", "--limit", "20")
+      assert_equal [15, 16], ids_of(old)[4, 2]
+    end
+  end
+
+  def test_negative_offset_is_a_usage_error
+    code = nil
+    _, err = capture_io { code = S.run(["", "--offset", "-1"]) }
+    assert_equal 2, code
+    assert_includes err, "offset cannot be negative"
+  end
+
+  # ---- --stats ----
+
+  def stats_of(err)
+    first = err.lines.first.to_s
+    assert first.start_with?("stats: "), "stats line must be first on stderr, got: #{err.inspect}"
+    JSON.parse(first.delete_prefix("stats: "))
+  end
+
+  def test_stats_line_is_first_on_stderr_and_parses
+    with_limit_fixture do
+      rows, err = run_search("id", "--limit", "3", "--stats", query: "from:alice")
+      assert_equal 3, rows.size
+      s = stats_of(err)
+      assert_equal({ "schema" => 1, "matches" => 10, "returned" => 3, "limit" => 3, "offset" => 0,
+                     "limit_by" => "date:desc", "sort" => "date:asc", "scan_limit" => nil,
+                     "scan_capped" => false, "query" => "from:alice", "effective_query" => "f alice" }, s)
+      assert_includes err.lines[1..].join, "f alice", "the translation notice follows the stats line"
+      refute_includes err, "[limit]"
+    end
+  end
+
+  def test_stats_scan_capped_reports_the_scanned_count_as_the_total
+    with_limit_fixture do
+      rows, err = run_search("id", "--scan-limit", "5", "--limit", "3", "--stats")
+      assert_equal 3, rows.size
+      s = stats_of(err)
+      assert_equal true, s["scan_capped"]
+      assert_equal 5, s["matches"]
+      assert_equal 5, s["scan_limit"]
+      assert_equal 3, s["returned"]
+      refute_includes err, "[scan-limit]"
+    end
+  end
+
+  def test_stats_carries_offset_and_returned_never_exceeds_matches
+    with_limit_fixture do
+      _, err = run_search("id", "--limit", "5", "--offset", "28", "--stats")
+      s = stats_of(err)
+      assert_equal 28, s["offset"]
+      assert_equal 2, s["returned"]
+      assert_operator s["matches"], :>=, s["returned"]
+    end
+  end
+
+  def test_no_stats_line_without_the_flag
+    with_limit_fixture do
+      _, err = run_search("id", "--limit", "3")
+      refute_includes err, "stats:"
+      assert_includes err, "[limit]"
+    end
+  end
+
+  def test_stats_with_zero_results_still_emits_the_line
+    with_limit_fixture do
+      rows, err = run_search("id", "--stats", query: "f nobody")
+      assert_empty rows
+      s = stats_of(err)
+      assert_equal 0, s["matches"]
+      assert_equal 0, s["returned"]
+    end
+  end
+
+  def test_stats_does_not_swallow_stderr_on_a_usage_error
+    code = nil
+    _, err = capture_io { code = S.run(["", "--sort", "bogus", "--stats"]) }
+    assert_equal 2, code
+    refute_includes err, "stats:"
+    assert_includes err, "unknown field"
   end
 end

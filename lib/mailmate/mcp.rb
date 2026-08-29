@@ -129,6 +129,7 @@ module Mailmate
             },
             limit: { type: "integer", description: "Return at most N rows — the top N by limit_by (default: the N newest), taken after the full scan. Truncation is announced on stderr, which is included in the result." },
             limit_by: { type: "string", description: "Which rows limit keeps: KEY[:asc|desc], KEY any output field (bare date/time = desc, text keys = asc). Default: date:desc (the N newest)." },
+            offset: { type: "integer", description: "Skip the first N rows of the limit_by ordering before taking limit (rows 1001-1200 = offset 1000, limit 200). Offsets drift as mail arrives; a date term in the query (d <2026-08-25) is the stable way to page." },
             scan_limit: { type: "integer", description: "Stop SCANNING after N matches, in undefined order — a speed bound for slow body scans, never a way to pick rows. Prefer limit." },
             headers_only: { type: "boolean", description: "Skip body matching (much faster on text searches)." },
             sort: { type: "string", description: "Order of the emitted rows: asc|desc|none (by date), or KEY[:asc|desc] for any output field, e.g. from, subject:desc. Ties break newest-first. Default: asc (date)." },
@@ -433,16 +434,27 @@ module Mailmate
       argv.push("--limit",      args["limit"].to_i.to_s)      if args["limit"]
       argv.push("--limit-by",   args["limit_by"].to_s)        if args["limit_by"]
       argv.push("--scan-limit", args["scan_limit"].to_i.to_s) if args["scan_limit"]
+      argv.push("--offset",     args["offset"].to_i.to_s)     if args["offset"]
       argv.push("--headers-only")                    if args["headers_only"]
       argv.push("--sort",    args["sort"].to_s)      if args["sort"]
       argv.push("--european")                        if args["european"]
+      # Always ask for the stats line: it carries the true match total and
+      # the truncation facts as one JSON object, first on stderr, in place
+      # of the prose notices. It stays in the text (readable as-is) and is
+      # ALSO surfaced as structuredContent for clients that render it.
+      argv.push("--stats")
       # Positionals: search-string then fields. Only include if the caller
       # gave us either — otherwise let the CLI apply its defaults.
       if args.key?("query") || args["fields"]
         argv << (args["query"] || "")
         argv << args["fields"].to_s if args["fields"]
       end
-      run_cli(Mailmate::CLI::Search, argv)
+      res = run_cli(Mailmate::CLI::Search, argv)
+      if (m = res[:content].first[:text].match(/^#{Regexp.escape(Mailmate::CLI::Search::STATS_PREFIX)}(\{.*\})$/))
+        stats = (JSON.parse(m[1]) rescue nil)
+        res[:structuredContent] = { stats: stats } if stats
+      end
+      res
     end
 
     def call_message(args)

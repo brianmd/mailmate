@@ -146,42 +146,21 @@ module Mailmate
         ct.include?("text/html") || body =~ /\A\s*<(?:!doctype html|html|body|head)\b/i
       end
 
-      # HTML → clean markdown for terminal reading. Three preprocessing /
-      # postprocessing passes beyond plain reverse_markdown:
-      #   1. Drop <style> and <script> blocks before conversion — pure clutter
-      #      that reverse_markdown otherwise dumps as inline text.
-      #   2. Strip zero-width spacers that newsletters use to control inbox
-      #      preview text (U+034F, U+200B/C/D, U+FEFF). Without this, you get
-      #      long runs of `͏ ` in the output.
-      #   3. Collapse 3+ consecutive blank lines into a single blank line.
+      # HTML → clean markdown for terminal reading, via the shared converter
+      # (Mailmate::HtmlMarkdown — ReplyPrefill quotes HTML-only parents with
+      # the same passes). Degrades to the raw HTML with a hint rather than
+      # `exit`: a library method must not kill its host, and the in-process
+      # MCP server would otherwise die on the SystemExit (its dispatch rescues
+      # StandardError only).
       def html_to_markdown(html)
-        begin
-          require "nokogiri"
-          require "reverse_markdown"
-        rescue LoadError => e
-          warn "mmmessage --markdown needs the reverse_markdown gem (which pulls nokogiri)."
-          warn "Install it with:  gem install reverse_markdown"
-          warn "(underlying: #{e.message}) — falling back to raw HTML."
-          # Degrade to the raw HTML rather than `exit`: a library method must
-          # not kill its host, and the in-process MCP server would otherwise
-          # die on the SystemExit (its dispatch rescues StandardError only).
-          return html
-        end
-        doc = Nokogiri::HTML(html)
-        doc.css("style, script").remove
-        md = ReverseMarkdown.convert(doc.to_html)
-        # U+034F combining grapheme joiner, U+200B ZWSP, U+200C ZWNJ,
-        # U+200D ZWJ, U+FEFF BOM/ZWNBSP — newsletter preview-text padding.
-        md.gsub!(/[\u034F\u200B\u200C\u200D\uFEFF]/, "")
-        # Convert non-breaking spaces to regular spaces so rstrip can collapse
-        # them. Newsletter preview-text padding often uses runs of &nbsp; which
-        # Ruby's .rstrip leaves alone otherwise.
-        md.gsub!(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/, " ")
-        # Strip trailing whitespace per line - the spaces between the
-        # now-removed zero-width chars otherwise leave long whitespace runs.
-        md = md.lines.map(&:rstrip).join("\n")
-        md.gsub!(/\n{3,}/, "\n\n")
-        md.strip
+        require_relative "../html_markdown"
+        md = Mailmate::HtmlMarkdown.convert(html)
+        return md if md
+
+        warn "mmmessage --markdown needs the reverse_markdown gem (which pulls nokogiri)."
+        warn "Install it with:  gem install reverse_markdown"
+        warn "Falling back to raw HTML."
+        html
       end
     end
   end

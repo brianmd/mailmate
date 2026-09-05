@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative "header_value"
+require_relative "html_markdown"
 
 module Mailmate
   # @api public
@@ -138,36 +139,66 @@ module Mailmate
     # Reply: email-classic "On <date>, <sender> wrote:" + a `> `-prefixed body.
     # Forward: the conventional un-prefixed forwarded-message block with its
     # own header summary, since the recipient has never seen the original.
+    #
+    # Which body gets quoted, in both modes: the HTML part rendered to
+    # markdown first — so the quote reads as the author laid it out
+    # (headings, links, emphasis) rather than as the text/plain alternative
+    # senders often neglect — then the plain part, then an honest placeholder
+    # when neither yields text (an HTML-only source with reverse_markdown not
+    # installed). A quote is never silently empty, and raw HTML is never
+    # quoted. (Until 2026-09-04 a reply preferred the plain part and a forward
+    # of an HTML-only message quoted nothing at all — the bug that prompted
+    # this: a bank alert forwarded as a bare header block.)
     def derive_quoted_body(mail, mode)
-      body = plain_body(mail)
       from = presence(mail["from"]&.value.to_s.strip) || "(unknown sender)"
       date = mail["date"]&.value.to_s.strip
 
       if mode == "forward"
+        body = quotable_body(mail) || FORWARD_PLACEHOLDER
         header = ["---------- Forwarded message ----------",
                   "From: #{from}",
                   ("Date: #{date}" unless date.empty?),
                   "Subject: #{mail.subject.to_s.strip}",
                   ("To: #{mail['to'].value}" if mail["to"])].compact.join("\n")
-        return "#{header}\n\n#{body}"
+        return "#{header}\n\n#{body.sub(/\n+\z/, '')}\n"
       end
 
       attribution = date.empty? ? "#{from} wrote:" : "On #{date}, #{from} wrote:"
-      return "#{attribution}\n> [no plain-text alternative — paste the original manually]\n" if body.strip.empty?
+      body = quotable_body(mail)
+      return "#{attribution}\n> #{REPLY_PLACEHOLDER}\n" if body.nil?
 
       quoted = body.sub(/\n+\z/, "").split("\n", -1).map { |l| "> #{l}".rstrip }.join("\n")
       "#{attribution}\n#{quoted}\n"
     end
 
-    # The text/plain alternative, or "" when the message is HTML-only. We do
-    # NOT synthesize text from the HTML part here: a lossy auto-conversion
-    # quoted back to the original sender is worse than an honest placeholder.
+    REPLY_PLACEHOLDER = "[no plain-text alternative — paste the original manually]"
+    FORWARD_PLACEHOLDER = "[the original has no readable text — it is HTML-only and the reverse_markdown gem is not installed; attach it or paste manually]"
+
+    # HTML-as-markdown, else plain text, else nil.
+    def quotable_body(mail)
+      presence(html_body_markdown(mail)) || presence(plain_body(mail))
+    end
+
+    # The text/plain alternative, or "" when the message is HTML-only.
     def plain_body(mail)
       part = mail.multipart? ? mail.text_part : mail
       return "" if part.nil?
       return "" if part.respond_to?(:mime_type) && part.mime_type && part.mime_type != "text/plain"
 
       part.body.decoded.to_s
+    rescue StandardError
+      ""
+    end
+
+    # The text/html part rendered to markdown (Mailmate::HtmlMarkdown), or ""
+    # when there is no HTML part or the optional converter is missing.
+    # `decoded` (not `body.decoded`) so the part's declared charset — the
+    # iso-8859-1 of a bank alert — is transcoded to UTF-8 before parsing.
+    def html_body_markdown(mail)
+      part = mail.multipart? ? mail.html_part : (mail.content_type.to_s.downcase.include?("text/html") ? mail : nil)
+      return "" if part.nil?
+
+      Mailmate::HtmlMarkdown.convert(part.decoded.to_s).to_s
     rescue StandardError
       ""
     end

@@ -142,12 +142,59 @@ class TestReplyPrefill < Minitest::Test
     end
   end
 
-  def test_html_only_parent_yields_an_honest_placeholder_not_a_lossy_conversion
-    raw = "From: parent@example.com\nSubject: Hi\nMessage-ID: <p@example.com>\n" \
-          "Content-Type: text/html\n\n<p>Hello <b>there</b></p>"
-    with_parent(raw) do
-      assert_includes build.quoted_body, "[no plain-text alternative"
-      refute_includes build.quoted_body, "<b>"
+  HTML_ONLY = "From: parent@example.com\nSubject: Hi\nMessage-ID: <p@example.com>\n" \
+              "Content-Type: text/html\n\n<p>Hello <b>there</b></p>"
+
+  # Both alternatives present: the html says one thing, the plain another,
+  # so a test can tell which one was quoted.
+  ALTERNATIVE = "From: parent@example.com\nSubject: Hi\nMessage-ID: <p@example.com>\n" \
+                "Content-Type: multipart/alternative; boundary=\"b1\"\n\n" \
+                "--b1\nContent-Type: text/plain\n\nPLAIN VERSION\n" \
+                "--b1\nContent-Type: text/html\n\n<p><b>HTML</b> VERSION</p>\n--b1--\n"
+
+  # Simulate the optional reverse_markdown gem being absent.
+  def without_converter
+    mod = Mailmate::HtmlMarkdown
+    orig = mod.method(:convert)
+    mod.define_singleton_method(:convert) { |_html| nil }
+    yield
+  ensure
+    mod.define_singleton_method(:convert, orig)
+  end
+
+  def test_html_only_parent_is_quoted_as_markdown_in_a_reply_never_as_raw_html
+    with_parent(HTML_ONLY) do
+      q = build.quoted_body
+      assert_includes q, "> Hello **there**"
+      refute_includes q, "<b>"
+    end
+  end
+
+  def test_reply_prefers_the_html_part_rendered_to_markdown_when_both_alternatives_exist
+    with_parent(ALTERNATIVE) do
+      q = build.quoted_body
+      assert_includes q, "> **HTML** VERSION"
+      refute_includes q, "PLAIN VERSION"
+    end
+  end
+
+  def test_reply_falls_back_to_the_plain_part_when_the_converter_is_missing
+    with_parent(ALTERNATIVE) do
+      without_converter do
+        q = build.quoted_body
+        assert_includes q, "> PLAIN VERSION"
+        refute_includes q, "HTML"
+      end
+    end
+  end
+
+  def test_html_only_reply_yields_an_honest_placeholder_when_the_converter_is_missing
+    with_parent(HTML_ONLY) do
+      without_converter do
+        q = build.quoted_body
+        assert_includes q, "[no plain-text alternative"
+        refute_includes q, "<b>"
+      end
     end
   end
 
@@ -166,6 +213,61 @@ class TestReplyPrefill < Minitest::Test
       p = build(mode: "forward")
       assert_empty p.to
       assert_equal "Fwd: Closet flickering", p.subject
+    end
+  end
+
+  # The bug that prompted this: a bank alert (HTML-only) forwarded from the
+  # markdownr popup carried the header block and nothing else. A forward's
+  # recipient has never seen the message, so the body must come from
+  # whatever part exists — and it should read as the author laid it out.
+  def test_forward_of_an_html_only_parent_carries_the_body_as_markdown
+    with_parent(HTML_ONLY) do
+      q = build(mode: "forward").quoted_body
+      assert_includes q, "---------- Forwarded message ----------"
+      assert_includes q, "Hello **there**"
+      refute_includes q, "<b>"
+      refute_includes q, "> Hello"
+    end
+  end
+
+  def test_forward_prefers_the_html_part_over_the_plain_alternative
+    with_parent(ALTERNATIVE) do
+      q = build(mode: "forward").quoted_body
+      assert_includes q, "**HTML** VERSION"
+      refute_includes q, "PLAIN VERSION"
+    end
+  end
+
+  def test_forward_falls_back_to_the_plain_part_when_the_converter_is_missing
+    with_parent(ALTERNATIVE) do
+      without_converter do
+        q = build(mode: "forward").quoted_body
+        assert_includes q, "PLAIN VERSION"
+        refute_includes q, "HTML"
+      end
+    end
+  end
+
+  def test_forward_of_an_html_only_parent_is_never_silently_empty
+    with_parent(HTML_ONLY) do
+      without_converter do
+        q = build(mode: "forward").quoted_body
+        assert_includes q, "[the original has no readable text"
+        refute_includes q, "<b>"
+      end
+    end
+  end
+
+  def test_forward_drops_style_blocks_and_comments_and_transcodes_the_declared_charset
+    raw = "From: parent@example.com\nSubject: Hi\nMessage-ID: <p@example.com>\n" \
+          "Content-Type: text/html; charset=iso-8859-1\nContent-Transfer-Encoding: 8bit\n\n" \
+          "<html><head><style>body{margin:0}</style></head><body><!-- tdMobZ1 --><p>Caf\xE9 <a href=\"https://x.example\">link</a></p></body></html>"
+    with_parent(raw.b) do
+      q = build(mode: "forward").quoted_body
+      assert_includes q, "Café"
+      assert_includes q, "[link](https://x.example)"
+      refute_includes q, "margin:0"
+      refute_includes q, "tdMobZ1"
     end
   end
 

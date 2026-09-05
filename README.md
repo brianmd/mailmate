@@ -106,7 +106,7 @@ mmdiscover
 
 **On the vast majority of Ruby setups (stock `arm64-darwin` or `x86_64-darwin` Ruby) this step is a no-op — nokogiri ships a precompiled binary, you can skip the rest of this section and move on.** Keep reading only if your `gem install` actually fails.
 
-`mmmessage --markdown` renders HTML-only message bodies as readable markdown. It needs the `reverse_markdown` gem, which has `nokogiri` as a transitive dependency:
+`mmmessage --markdown` renders HTML-only message bodies as readable markdown, and (since 2.2.0) the quoted original of a reply or forward is the parent's HTML part rendered the same way, so it reads as the author laid it out. Both need the `reverse_markdown` gem, which has `nokogiri` as a transitive dependency:
 
 ```bash
 gem install reverse_markdown
@@ -114,7 +114,7 @@ gem install reverse_markdown
 
 That single command pulls `nokogiri` in automatically — no separate `gem install nokogiri` step. This is kept out of the base install because nokogiri ships a native extension. On Ruby/platform combinations without a precompiled match nokogiri falls back to compiling from source — it vendors its own libxml2/libxslt, but it does need a C compiler, which on macOS means Xcode Command Line Tools (`xcode-select --install`). If `gem install reverse_markdown` fails, that's almost certainly the cause.
 
-If you never use `--markdown`, you never pay any of this. If you do invoke `--markdown` without the gem installed, `mmmessage` warns with a clear install hint and falls back to the raw HTML body (it does not abort — so the in-process MCP server survives a missing optional dependency). The plugin launcher and one-line installer attempt this gem automatically and degrade the same way if it fails to build.
+If you never use `--markdown` or compose from a parent, you never pay any of this. Without the gem, a reply/forward quotes the plain-text part instead (or an honest placeholder for an HTML-only parent); if you invoke `--markdown` without it, `mmmessage` warns with a clear install hint and falls back to the raw HTML body (it does not abort — so the in-process MCP server survives a missing optional dependency). The plugin launcher and one-line installer attempt this gem automatically and degrade the same way if it fails to build.
 
 ### From source (development)
 
@@ -385,7 +385,7 @@ mm-send -f you@x --reply-all-to 12345 --send-now <<<"body"
 mm-send -f you@x --forward 12345 -t someone@example.com <<<"FYI"
 ```
 
-The parent is an eml-id or an RFC Message-ID. **Fields you pass explicitly win; fields you omit follow normal reply rules**, and overriding a visible field never drops the threading headers. `--no-quote` suppresses the quoted original. `--print-prefill` prints the derived fields as JSON and sends nothing — the hook for other tools that fill their own compose form.
+The parent is an eml-id or an RFC Message-ID. **Fields you pass explicitly win; fields you omit follow normal reply rules**, and overriding a visible field never drops the threading headers. `--no-quote` suppresses the quoted original (the parent's HTML part rendered to markdown when it has one, else its plain text — see `docs/Composing and threading.md`). `--print-prefill` prints the derived fields as JSON and sends nothing — the hook for other tools that fill their own compose form.
 
 Hand-assembly via `--header` still works and is the escape hatch when the parent isn't in MailMate's index. The `mailmate-mcp` `send` / `draft` tools take `in_reply_to` and `references` directly.
 

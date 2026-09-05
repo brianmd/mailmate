@@ -54,9 +54,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency "mail", "~> 2.8"
   # csv was a default gem through Ruby 3.3; 3.4+ requires it explicitly.
   spec.add_dependency "csv", "~> 3.0"
-  # `mmmessage --markdown` (and the MCP `message` tool's markdown:true) use
-  # reverse_markdown (which pulls nokogiri) to render HTML-only bodies as
-  # readable markdown. Kept OPTIONAL so the base install stays free of native
+  # `mmmessage --markdown` (and the MCP `message` tool's markdown:true) and
+  # ReplyPrefill's quoted original (mm-send --reply-to/--forward, markdownr's
+  # compose) use reverse_markdown (which pulls nokogiri) to render HTML
+  # bodies as readable markdown (Mailmate::HtmlMarkdown). Kept OPTIONAL so the base install stays free of native
   # extensions — users who never invoke --markdown don't need a compiler if
   # nokogiri lacks a precompiled binary for their Ruby/platform. If --markdown
   # is used without the gem present, mmmessage warns with a clear

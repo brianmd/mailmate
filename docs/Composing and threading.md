@@ -47,6 +47,8 @@ mm-send -f you@x -t them@y -s "Re: foo" \
 
 When a parent is supplied, **explicitly-passed fields always win; omitted fields follow normal reply rules** (parent's sender becomes the recipient, subject becomes `Re: <original>`, the quoted original seeds the body, reply-all additionally carries the other recipients minus your own identities).
 
+**What "the quoted original" is** (2.2.0): the parent's HTML part rendered to markdown when it has one — so the quote reads as the author laid it out (headings, links, emphasis) rather than as the text/plain alternative many senders neglect — else the plain part, else an honest placeholder saying there is no readable text. Raw HTML is never quoted, and a quote is never silently empty. The rendering needs the optional `reverse_markdown` gem (the same one `mmmessage --markdown` uses); without it the plain part is used. Same in every mode; a forward wraps it in the `---------- Forwarded message ----------` header block, a reply prefixes it with `> `.
+
 This rule is uniform across every surface that composes from a parent — the CLI flags above and markdownr's compose popup — so a caller who learns it once can predict all of them. Overriding a visible field never drops the threading headers.
 
 ## Header safety

@@ -239,7 +239,7 @@ mmmessage 183715 --mailmate
 mmmessage 183715 --markdown
 ```
 
-`--markdown` uses `reverse_markdown` + Nokogiri preprocessing to drop `<style>`/`<script>` blocks and strip newsletter preview-text padding (zero-width chars, runs of non-breaking / figure / narrow spaces, etc.). Conversion quality is good for plain replies/threads and rough for marketing-newsletter HTML (which uses nested layout tables); the raw source is still available with `--raw`.
+`--markdown` uses `reverse_markdown` + Nokogiri preprocessing (`Mailmate::HtmlMarkdown`, shared with the quoted original of a reply/forward): it drops `<head>`/`<style>`/`<script>`/comments, hidden (`display:none`) elements and tracking pixels, strips newsletter preview-text padding (zero-width chars, non-breaking spaces), and — the part that makes transactional mail readable — unwraps nested *layout* tables into flowing text while keeping real data tables (a regular grid of short cells) as markdown tables. The raw source is still available with `--raw`.
 
 ### `mmopen` — open a message in MailMate's UI
 

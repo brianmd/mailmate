@@ -202,6 +202,13 @@ class TestMCP < Minitest::Test
     refute_includes header, "\r"
   end
 
+  # Appended after -s/--header, emate read each path as another value of
+  # that flag and the attachment never reached the message (2026-10-13).
+  def test_attachments_lead_the_argv_ahead_of_every_flag
+    argv = compose_argv({ "to" => "a@b.c", "subject" => "S", "references" => "<r@x>", "attachments" => ["/tmp/a.pdf", "/tmp/b.jpg"] })
+    assert_equal ["/tmp/a.pdf", "/tmp/b.jpg"], argv.first(2)
+  end
+  
   def test_a_call_with_no_recipient_and_no_parent_is_an_error
     res = S.send(:call_draft, { "subject" => "x", "body" => "y" })
     assert res[:isError], "expected isError for a recipient-less draft"

@@ -69,11 +69,27 @@ class TestSend < Minitest::Test
       end
       assert_equal 0, actual
       captured = File.read(capture)
-      assert_includes captured, "ARGV: mailto --markup markdown -t x@y.z -s subj"
+      assert_includes captured, "ARGV: mailto -t x@y.z -s subj --markup markdown"
       assert_includes captured, "THE REAL COMPOSED BODY"
     end
   end
 
+  # ---- markup placement: the swallowed-attachment bug (2026-10-13) ----
+  #
+  # emate (CLI11) gives -m and every address/subject flag unlimited values,
+  # so whatever bare word follows becomes another value. A leading
+  # attachment after a prepended `--markup markdown` was read as markup.
+  
+  def test_markup_goes_last_so_a_leading_attachment_stays_positional
+    args = Mailmate::CLI::Send.emate_args(["/tmp/photo.jpg", "-t", "x@y.z", "--send-now"])
+    assert_equal ["/tmp/photo.jpg", "-t", "x@y.z", "--send-now", "--markup", "markdown"], args
+  end
+  
+  def test_markup_goes_before_a_callers_end_of_options_marker
+    args = Mailmate::CLI::Send.emate_args(["-t", "x@y.z", "--", "-odd-name.pdf"])
+    assert_equal ["-t", "x@y.z", "--markup", "markdown", "--", "-odd-name.pdf"], args
+  end
+  
   def test_emate_output_is_reemitted_through_ruby_globals
     Dir.mktmpdir do |dir|
       fake = write_fake_emate(dir, File.join(dir, "capture.txt"))

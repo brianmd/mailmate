@@ -519,7 +519,10 @@ module Mailmate
     # Shared message-composition argv for both send and draft (everything bar
     # the body, which is piped on stdin, and the send-only `--send-now`).
     def compose_argv(args)
-      argv = []
+      # Attachments FIRST. emate reads every bare path after a multi-value
+      # flag (-s, --header, …) as another value of that flag, so appended
+      # after them they were silently lost. See CLI::Send#emate_args.
+      argv = Array(args["attachments"]).map(&:to_s)
       argv.push("-f", args["from"].to_s)    if args["from"]
       argv.push("-t", args["to"].to_s)      if args["to"]
       argv.push("-c", args["cc"].to_s)      if args["cc"]
@@ -543,7 +546,6 @@ module Mailmate
         argv.push(flag, parent.to_s)
         argv << "--no-quote" if args["quote"] == false
       end
-      Array(args["attachments"]).each { |p| argv << p.to_s }
       argv
     end
 

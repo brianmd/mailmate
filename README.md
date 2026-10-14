@@ -364,9 +364,11 @@ mm-send -t friend@example.com -c cc@example.com -s "Status update" --send-now <<
 - on to the next
 EOF
 
-# Attach files (positional args after options)
-mm-send -t friend@example.com -s "Photos" /path/to/photo1.jpg /path/to/photo2.jpg <<<"See attached."
+# Attach files: list them FIRST (see below)
+mm-send /path/to/photo1.jpg /path/to/photo2.jpg -t friend@example.com -s "Photos" <<<"See attached."
 ```
+
+**Attachments go first.** emate's `-f`/`-t`/`-c`/`-b`/`-s`/`--header` each take any number of values, so a file path right after one of them is read as another recipient or subject. The attachment is then dropped without an error. Put attachment paths before every flag, or right after a flag that takes no value such as `--send-now`. mm-send appends its own `--markup markdown` last for the same reason (fixed in 2.2.2; earlier versions put it first, which swallowed a leading attachment and turned off markdown rendering).
 
 #### Replies, forwards, and threading
 

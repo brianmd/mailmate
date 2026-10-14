@@ -30,6 +30,14 @@ module Mailmate
           explicitly win; fields you omit follow normal reply rules. --header
           stays available as the escape hatch when the parent isn't indexed.
 
+        Attachments
+          Attachments are bare file paths. emate's address, subject and header
+          flags take any number of values, so a path right after one of them
+          is read as another recipient or subject, silently. List attachments
+          FIRST, or after a flag that takes no value such as --send-now.
+
+            mm-send /path/a.pdf -t friend@x -s "Docs" --send-now <<<"Attached."
+
         Identity selection
           `-f <address>` picks which of MailMate's configured identities sends.
           Without `-f`, MailMate uses its default identity. See `mmdiscover` to
@@ -81,12 +89,26 @@ module Mailmate
         # interactive `mm-send --help` waiting for Ctrl-D.
         body = help ? "" : $stdin.read.to_s
         body = append_quote(body, derived) if derived
-        out, err, status = Open3.capture3(EMATE_PATH, "mailto", "--markup", "markdown", *argv, stdin_data: body)
+        out, err, status = Open3.capture3(EMATE_PATH, "mailto", *emate_args(argv), stdin_data: body)
         $stdout.write(out)
         $stderr.write(err)
         # exitstatus is nil for a signal-killed child; the exe shims do
         # `exit run(ARGV)`, which needs an Integer.
         status.exitstatus || 1
+      end
+
+      # The enforced `--markup markdown` goes LAST. emate parses with CLI11,
+      # where -f/-t/-c/-b/-r/-s/-m/--header each take any number of values:
+      # every bare word after one of them is read as another value until the
+      # next flag. Prepended, `--markup markdown photo.jpg -t …` read the
+      # photo as a second markup value, which dropped the attachment AND the
+      # markdown rendering while emate still exited 0 (2026-10-13: tenant
+      # mail from markdownr's compose popup, which lists attachments first).
+      # Last, nothing follows it to swallow. A caller's `--` ends option
+      # parsing, so the flag goes in front of that instead.
+      def emate_args(argv)
+        at = argv.index("--") || argv.length
+        argv.dup.insert(at, "--markup", "markdown")
       end
 
       # Flags this wrapper consumes itself. Everything else in argv is emate's

@@ -47,8 +47,15 @@ module Mailmate
 
     # Derived paths. Each follows from app_support_dir; if a user has a
     # non-default MailMate install, overriding app_support_dir flows through.
+    # MailMate stores mail under `Messages.noindex/` on most installs, but some
+    # long-lived installs still use the older `Messages/` folder name. Prefer
+    # `Messages.noindex` (also the answer when neither exists yet), and fall
+    # back to `Messages` only when that is the one actually on disk.
     def imap_root
-      File.join(app_support_dir, "Messages.noindex", "IMAP")
+      noindex = File.join(app_support_dir, "Messages.noindex", "IMAP")
+      legacy  = File.join(app_support_dir, "Messages", "IMAP")
+      return legacy if !File.directory?(noindex) && File.directory?(legacy)
+      noindex
     end
 
     def db_headers

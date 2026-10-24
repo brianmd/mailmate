@@ -272,6 +272,20 @@ class TestMcpSearchLimitAndSort < Minitest::Test
     assert_includes res[:content].first[:text], "stats: {", "the line stays readable in the text too"
   end
 
+  def test_call_search_puts_the_rows_in_structured_content_too
+    # Clients that show structuredContent in place of the text must still
+    # see the matching rows, not just the stats.
+    fake = lambda do |_argv|
+      warn 'stats: {"schema":1,"matches":2,"returned":2,"scan_capped":false}'
+      puts "id,subject\n1,hello\n2,world"
+      0
+    end
+    res = Mailmate::CLI::Search.stub(:run, fake) { S.dispatch("search", "query" => "x") }
+    assert_includes res[:structuredContent][:output], "1,hello"
+    assert_includes res[:structuredContent][:output], "2,world"
+    assert_equal res[:content].first[:text], res[:structuredContent][:output]
+  end
+
   def test_call_search_leaves_a_malformed_stats_line_as_text
     fake = ->(_argv) { warn "stats: {not json"; puts "id\n1"; 0 }
     res = Mailmate::CLI::Search.stub(:run, fake) { S.dispatch("search", "query" => "x") }

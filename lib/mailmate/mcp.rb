@@ -442,6 +442,10 @@ module Mailmate
       # the truncation facts as one JSON object, first on stderr, in place
       # of the prose notices. It stays in the text (readable as-is) and is
       # ALSO surfaced as structuredContent for clients that render it.
+      # Some clients (Claude Desktop among them) show a tool's
+      # structuredContent INSTEAD of its text content when both are present,
+      # so the result rows go in structuredContent too — otherwise those
+      # clients see the match count and none of the matches.
       argv.push("--stats")
       # Positionals: search-string then fields. Only include if the caller
       # gave us either — otherwise let the CLI apply its defaults.
@@ -452,7 +456,7 @@ module Mailmate
       res = run_cli(Mailmate::CLI::Search, argv)
       if (m = res[:content].first[:text].match(/^#{Regexp.escape(Mailmate::CLI::Search::STATS_PREFIX)}(\{.*\})$/))
         stats = (JSON.parse(m[1]) rescue nil)
-        res[:structuredContent] = { stats: stats } if stats
+        res[:structuredContent] = { stats: stats, output: res[:content].first[:text] } if stats
       end
       res
     end

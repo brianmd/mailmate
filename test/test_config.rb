@@ -2,6 +2,7 @@
 
 require_relative "test_helper"
 require "tmpdir"
+require "fileutils"
 
 class TestConfig < Minitest::Test
   include Mailmate::TestHelpers
@@ -19,6 +20,24 @@ class TestConfig < Minitest::Test
     assert_equal "/tmp/mm/Mailboxes.plist", cfg.mailboxes_plist
     assert_equal "/tmp/mm/Sources.plist", cfg.sources_plist
     assert_equal "/tmp/mm/Identities.plist", cfg.identities_plist
+  end
+
+  def test_imap_root_prefers_messages_noindex_when_both_exist
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "Messages.noindex", "IMAP"))
+      FileUtils.mkdir_p(File.join(dir, "Messages", "IMAP"))
+      cfg = Mailmate::Config.new(yaml_path: "/nonexistent", env: { "MAILMATE_APP_SUPPORT_DIR" => dir })
+      assert_equal File.join(dir, "Messages.noindex", "IMAP"), cfg.imap_root
+    end
+  end
+
+  def test_imap_root_falls_back_to_legacy_messages_folder
+    # Older MailMate installs keep mail under Messages/ (no .noindex).
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "Messages", "IMAP"))
+      cfg = Mailmate::Config.new(yaml_path: "/nonexistent", env: { "MAILMATE_APP_SUPPORT_DIR" => dir })
+      assert_equal File.join(dir, "Messages", "IMAP"), cfg.imap_root
+    end
   end
 
   def test_yaml_loading
